@@ -1,0 +1,6 @@
+{
+  "name": "Staff Video Training Platform",
+  "description": "Video-based staff training system with quiz verification, progress tracking, home location access control, and admin management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
