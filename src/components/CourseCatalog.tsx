@@ -25,27 +25,27 @@ export const CourseCatalog: React.FC<CourseCatalogProps> = ({ sections, onSelect
         sections.map((section, secIdx) => (
           <div
             key={section.id}
-            className="bg-white rounded-[32px] p-6 border border-slate-200 shadow-sm space-y-4"
+            className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 border border-slate-200 shadow-sm space-y-4"
           >
             {/* Section Title Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b border-slate-100 pb-4 gap-2">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-sm">
+                <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-sm shrink-0">
                   {secIdx + 1}
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-slate-900">{section.title}</h3>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900">{section.title}</h3>
                   <p className="text-xs text-slate-500">{section.description}</p>
                 </div>
               </div>
 
-              <span className="text-xs font-semibold px-3 py-1 bg-slate-100 text-slate-600 rounded-full">
+              <span className="text-xs font-semibold px-3 py-1 bg-slate-100 text-slate-600 rounded-full shrink-0">
                 {section.videos.length} Videos
               </span>
             </div>
 
             {/* Video Cards Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
               {section.videos.map((vid, vidIdx) => {
                 const isPassed = vid.passed;
                 const isWatched = vid.watchedFinished;
@@ -55,7 +55,7 @@ export const CourseCatalog: React.FC<CourseCatalogProps> = ({ sections, onSelect
                   <div
                     key={vid.id}
                     onClick={() => onSelectVideo(vid)}
-                    className={`group p-5 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between ${
+                    className={`group p-4 sm:p-5 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between ${
                       isPassed
                         ? 'bg-emerald-50/50 border-emerald-200 hover:bg-emerald-50'
                         : 'bg-slate-50 hover:bg-white border-slate-200 hover:border-indigo-300 hover:shadow-md'
@@ -93,7 +93,7 @@ export const CourseCatalog: React.FC<CourseCatalogProps> = ({ sections, onSelect
                         <span>Watch Video</span>
                       </div>
 
-                      <button className="p-2 rounded-xl bg-indigo-600 text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-md shadow-indigo-200">
+                      <button className="p-2 rounded-xl bg-indigo-600 text-white opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity shadow-md shadow-indigo-200">
                         <Play className="w-4 h-4 fill-current" />
                       </button>
                     </div>

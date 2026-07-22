@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Section, Home, User, StaffReport } from '../types';
-import { Plus, Video, Users, Building2, BarChart3, Trash2, Edit, AlertCircle, CheckCircle2, ShieldCheck, KeyRound } from 'lucide-react';
+import { Plus, Video, Users, Building2, BarChart3, Trash2, Edit, AlertCircle, CheckCircle2, ShieldCheck, KeyRound, Upload, Link as LinkIcon, FileVideo, ShieldAlert } from 'lucide-react';
 
 interface AdminPanelProps {
   currentUser: User;
@@ -16,7 +16,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [selectedSectionId, setSelectedSectionId] = useState<number>(sections[0]?.id || 1);
   const [videoTitle, setVideoTitle] = useState('');
   const [videoDesc, setVideoDesc] = useState('');
+  const [videoSourceMode, setVideoSourceMode] = useState<'file' | 'url'>('file');
   const [videoUrl, setVideoUrl] = useState('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4');
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [uploadedFileSize, setUploadedFileSize] = useState<string | null>(null);
   const [duration, setDuration] = useState(180);
 
   // 3 Quiz Questions State
@@ -34,6 +37,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
 
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
 
   // Home Creation State
   const [newHomeName, setNewHomeName] = useState('');
@@ -47,8 +51,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [newStaffEmail, setNewStaffEmail] = useState('');
   const [newStaffUsername, setNewStaffUsername] = useState('');
+  const [newStaffPassword, setNewStaffPassword] = useState('staff123');
   const [newStaffRole, setNewStaffRole] = useState<'staff' | 'admin'>('staff');
   const [newStaffHomeId, setNewStaffHomeId] = useState<number>(homes[0]?.id || 1);
+  const [userActionMsg, setUserActionMsg] = useState<string | null>(null);
+  const [userActionErr, setUserActionErr] = useState<string | null>(null);
+  const [userToDelete, setUserToDelete] = useState<User | null>(null);
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
 
   // Reports State
   const [reports, setReports] = useState<StaffReport[]>([]);
@@ -102,10 +111,41 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     }
   };
 
+  // Handle local PC video file upload
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsProcessingFile(true);
+    setUploadErr(null);
+
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    setUploadedFileName(file.name);
+    setUploadedFileSize(`${fileSizeMB} MB`);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setVideoUrl(event.target.result as string);
+        setIsProcessingFile(false);
+      }
+    };
+    reader.onerror = () => {
+      setUploadErr('Failed to read selected video file.');
+      setIsProcessingFile(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleUploadVideo = async (e: React.FormEvent) => {
     e.preventDefault();
     setUploadErr(null);
     setUploadMsg(null);
+
+    if (!videoUrl) {
+      setUploadErr('Please upload a video file or enter a video URL.');
+      return;
+    }
 
     const questions = [
       { question: q1Question, options: q1Opts, correctIndex: q1Correct },
@@ -133,9 +173,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to upload video');
 
-      setUploadMsg('Video training module and 3 quiz questions created successfully!');
+      setUploadMsg('Training video module and 3 quiz questions created successfully!');
       setVideoTitle('');
       setVideoDesc('');
+      setUploadedFileName(null);
+      setUploadedFileSize(null);
       onRefreshData();
     } catch (err: any) {
       setUploadErr(err.message || 'Error creating video module');
@@ -188,7 +230,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newStaffEmail || !newStaffUsername) return;
+    setUserActionErr(null);
+    setUserActionMsg(null);
+
+    if (!newStaffEmail || !newStaffUsername) {
+      setUserActionErr('Email and Username are required.');
+      return;
+    }
+
     try {
       const res = await fetch('/api/admin/users', {
         method: 'POST',
@@ -199,30 +248,65 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
         body: JSON.stringify({
           email: newStaffEmail,
           username: newStaffUsername,
+          password: newStaffPassword || 'staff123',
           role: newStaffRole,
           homeId: newStaffHomeId,
         }),
       });
-      if (res.ok) {
-        setNewStaffEmail('');
-        setNewStaffUsername('');
-        fetchUsers();
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to create user');
       }
-    } catch (e) {
-      console.error(e);
+
+      setUserActionMsg(`New ${newStaffRole.toUpperCase()} account created for ${newStaffUsername}!`);
+      setNewStaffEmail('');
+      setNewStaffUsername('');
+      setNewStaffPassword('staff123');
+      fetchUsers();
+    } catch (e: any) {
+      setUserActionErr(e.message || 'Error creating user account');
     }
   };
 
-  const handleDeleteUser = async (id: number) => {
-    if (!confirm('Are you sure you want to remove this user?')) return;
+  const promptDeleteUser = (u: User) => {
+    setUserActionErr(null);
+    setUserActionMsg(null);
+
+    if (u.id === currentUser.id) {
+      setUserActionErr('You cannot delete your own active admin account!');
+      return;
+    }
+
+    setUserToDelete(u);
+  };
+
+  const executeDeleteUser = async () => {
+    if (!userToDelete) return;
+
+    setIsDeletingUser(true);
+    setUserActionErr(null);
+    setUserActionMsg(null);
+
     try {
-      await fetch(`/api/admin/users/${id}`, {
+      const res = await fetch(`/api/admin/users/${userToDelete.id}`, {
         method: 'DELETE',
         headers: { 'X-User-Id': currentUser.id.toString() },
       });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to delete user');
+      }
+
+      setUserActionMsg(`User "${userToDelete.username}" (${userToDelete.role}) was deleted successfully.`);
+      setUserToDelete(null);
       fetchUsers();
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setUserActionErr(e.message || 'Error deleting user');
+      setUserToDelete(null);
+    } finally {
+      setIsDeletingUser(false);
     }
   };
 
@@ -235,58 +319,58 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
             Admin Management Portal
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            Upload videos, organize section titles, manage staff & home access, and view progress reports.
+            Upload videos from PC or URL, manage staff & admin users, organize sections, and view reports.
           </p>
         </div>
       </div>
 
       {/* Admin Sub-Tabs */}
-      <div className="flex bg-white p-1.5 rounded-2xl border border-slate-200 shadow-sm max-w-2xl">
+      <div className="flex overflow-x-auto bg-white p-1.5 rounded-2xl border border-slate-200 shadow-sm gap-1 scrollbar-none">
         <button
           onClick={() => setActiveSubTab('upload')}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 sm:flex-1 ${
             activeSubTab === 'upload' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <Video className="w-3.5 h-3.5" /> Upload Video
+          <Video className="w-3.5 h-3.5 shrink-0" /> Upload Video
         </button>
         <button
           onClick={() => setActiveSubTab('sections')}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 sm:flex-1 ${
             activeSubTab === 'sections' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <Plus className="w-3.5 h-3.5" /> Titles/Sections
+          <Plus className="w-3.5 h-3.5 shrink-0" /> Titles/Sections
         </button>
         <button
           onClick={() => setActiveSubTab('homes')}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 sm:flex-1 ${
             activeSubTab === 'homes' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <Building2 className="w-3.5 h-3.5" /> Homes
+          <Building2 className="w-3.5 h-3.5 shrink-0" /> Homes
         </button>
         <button
           onClick={() => setActiveSubTab('users')}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 sm:flex-1 ${
             activeSubTab === 'users' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <Users className="w-3.5 h-3.5" /> Staff
+          <Users className="w-3.5 h-3.5 shrink-0" /> Staff & Admins
         </button>
         <button
           onClick={() => setActiveSubTab('reports')}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 sm:flex-1 ${
             activeSubTab === 'reports' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <BarChart3 className="w-3.5 h-3.5" /> Completion Reports
+          <BarChart3 className="w-3.5 h-3.5 shrink-0" /> Completion Reports
         </button>
       </div>
 
       {/* 1. UPLOAD VIDEO MODULE FORM */}
       {activeSubTab === 'upload' && (
-        <form onSubmit={handleUploadVideo} className="bg-white rounded-[32px] p-8 border border-slate-200 shadow-sm space-y-6">
+        <form onSubmit={handleUploadVideo} className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
           <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">
             Add New Training Video & 3 Quiz Questions
           </h3>
@@ -308,7 +392,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
               <select
                 value={selectedSectionId}
                 onChange={(e) => setSelectedSectionId(parseInt(e.target.value, 10))}
-                className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm"
+                className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold"
               >
                 {sections.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -326,21 +410,90 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                 value={videoTitle}
                 onChange={(e) => setVideoTitle(e.target.value)}
                 placeholder="e.g. Infection Control Standards"
-                className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm"
+                className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold"
               />
+            </div>
+          </div>
+
+          {/* Video Source Selector (PC File Upload vs Web URL) */}
+          <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                <FileVideo className="w-4 h-4 text-indigo-600" /> Video File Source
+              </label>
+
+              <div className="flex bg-white p-1 rounded-xl border border-slate-200 text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setVideoSourceMode('file')}
+                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all ${
+                    videoSourceMode === 'file' ? 'bg-indigo-600 text-white shadow' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Upload className="w-3.5 h-3.5" /> Upload from PC
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVideoSourceMode('url')}
+                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all ${
+                    videoSourceMode === 'url' ? 'bg-indigo-600 text-white shadow' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <LinkIcon className="w-3.5 h-3.5" /> Video URL
+                </button>
+              </div>
             </div>
 
-            <div className="md:col-span-2">
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Video MP4 URL</label>
-              <input
-                type="url"
-                required
-                value={videoUrl}
-                onChange={(e) => setVideoUrl(e.target.value)}
-                placeholder="https://commondatastorage.googleapis.com/.../sample.mp4"
-                className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-mono text-xs"
-              />
-            </div>
+            {videoSourceMode === 'file' ? (
+              <div className="space-y-3">
+                <div className="border-2 border-dashed border-indigo-200 bg-indigo-50/40 hover:bg-indigo-50 rounded-2xl p-6 text-center cursor-pointer transition-all relative">
+                  <input
+                    type="file"
+                    accept="video/mp4,video/webm,video/ogg,video/*"
+                    onChange={handleFileChange}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                  <div className="flex flex-col items-center justify-center space-y-2">
+                    <div className="p-3 bg-indigo-600 text-white rounded-2xl shadow-md shadow-indigo-200">
+                      <Upload className="w-6 h-6" />
+                    </div>
+                    <p className="font-bold text-slate-800 text-sm">
+                      Click or drag MP4 video file from your PC
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Supports MP4, WebM, OGG files directly from your computer
+                    </p>
+                    {uploadedFileName && (
+                      <span className="mt-2 px-3 py-1 bg-emerald-100 text-emerald-800 rounded-full text-xs font-bold font-mono">
+                        Loaded: {uploadedFileName} ({uploadedFileSize})
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Direct Video MP4 URL</label>
+                <input
+                  type="url"
+                  required={videoSourceMode === 'url'}
+                  value={videoUrl}
+                  onChange={(e) => setVideoUrl(e.target.value)}
+                  placeholder="https://commondatastorage.googleapis.com/.../sample.mp4"
+                  className="w-full px-4 py-2.5 rounded-2xl bg-white border border-slate-200 text-xs font-mono"
+                />
+              </div>
+            )}
+
+            {/* Video Live Preview */}
+            {videoUrl && (
+              <div className="space-y-2 pt-2 border-t border-slate-200">
+                <span className="text-xs font-bold text-slate-600">Video Player Test Preview</span>
+                <div className="rounded-2xl overflow-hidden bg-slate-950 aspect-video max-h-56 flex items-center justify-center border border-slate-800">
+                  <video src={videoUrl} controls className="w-full h-full object-contain" />
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="pt-4 border-t border-slate-100 space-y-4">
@@ -354,7 +507,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                 required
                 value={q1Question}
                 onChange={(e) => setQ1Question(e.target.value)}
-                className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs"
+                className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium"
               />
             </div>
 
@@ -366,7 +519,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                 required
                 value={q2Question}
                 onChange={(e) => setQ2Question(e.target.value)}
-                className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs"
+                className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium"
               />
             </div>
 
@@ -378,25 +531,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                 required
                 value={q3Question}
                 onChange={(e) => setQ3Question(e.target.value)}
-                className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs"
+                className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium"
               />
             </div>
           </div>
 
           <button
             type="submit"
-            className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold text-sm shadow-xl shadow-indigo-200"
+            disabled={isProcessingFile}
+            className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold text-sm shadow-xl shadow-indigo-200 transition-all flex items-center justify-center gap-2"
           >
-            Publish Training Video Module
+            {isProcessingFile ? 'Loading Video File...' : 'Publish Training Video Module'}
           </button>
         </form>
       )}
 
       {/* 2. SECTIONS MANAGEMENT */}
       {activeSubTab === 'sections' && (
-        <div className="bg-white rounded-[32px] p-8 border border-slate-200 shadow-sm space-y-6">
+        <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
           <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Add Training Section/Title</h3>
-          <form onSubmit={handleCreateSection} className="flex gap-2">
+          <form onSubmit={handleCreateSection} className="flex flex-col sm:flex-row gap-2">
             <input
               type="text"
               placeholder="e.g. Hygiene & Medication Safety"
@@ -404,7 +558,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
               onChange={(e) => setNewSecTitle(e.target.value)}
               className="flex-1 px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm"
             />
-            <button type="submit" className="px-6 py-2.5 bg-indigo-600 text-white font-bold rounded-2xl text-xs shadow-md shadow-indigo-200">
+            <button type="submit" className="px-6 py-2.5 bg-indigo-600 text-white font-bold rounded-2xl text-xs shadow-md shadow-indigo-200 shrink-0">
               Add Section
             </button>
           </form>
@@ -424,9 +578,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
 
       {/* 3. HOMES LOCATION MANAGEMENT */}
       {activeSubTab === 'homes' && (
-        <div className="bg-white rounded-[32px] p-8 border border-slate-200 shadow-sm space-y-6">
+        <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
           <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Workplace Homes (Currently Hasset & Hope)</h3>
-          <form onSubmit={handleCreateHome} className="flex gap-2">
+          <form onSubmit={handleCreateHome} className="flex flex-col sm:flex-row gap-2">
             <input
               type="text"
               placeholder="New Home Name (e.g. Grace Home)"
@@ -434,7 +588,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
               onChange={(e) => setNewHomeName(e.target.value)}
               className="flex-1 px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm"
             />
-            <button type="submit" className="px-6 py-2.5 bg-indigo-600 text-white font-bold rounded-2xl text-xs shadow-md shadow-indigo-200">
+            <button type="submit" className="px-6 py-2.5 bg-indigo-600 text-white font-bold rounded-2xl text-xs shadow-md shadow-indigo-200 shrink-0">
               Add Home
             </button>
           </form>
@@ -442,7 +596,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4">
             {homes.map((h) => (
               <div key={h.id} className="p-5 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-3">
-                <Building2 className="w-6 h-6 text-indigo-600" />
+                <Building2 className="w-6 h-6 text-indigo-600 shrink-0" />
                 <div>
                   <h4 className="font-bold text-slate-800 text-sm">{h.name}</h4>
                   <span className="text-[10px] font-mono font-bold bg-slate-200 px-2 py-0.5 rounded text-slate-600">
@@ -455,65 +609,173 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
         </div>
       )}
 
-      {/* 4. USER / STAFF MANAGEMENT */}
+      {/* 4. USER / STAFF & ADMIN MANAGEMENT */}
       {activeSubTab === 'users' && (
-        <div className="bg-white rounded-[32px] p-8 border border-slate-200 shadow-sm space-y-6">
-          <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Staff & Admin Users</h3>
-          <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-            <input
-              type="email"
-              placeholder="Email"
-              value={newStaffEmail}
-              onChange={(e) => setNewStaffEmail(e.target.value)}
-              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"
-            />
-            <input
-              type="text"
-              placeholder="Username"
-              value={newStaffUsername}
-              onChange={(e) => setNewStaffUsername(e.target.value)}
-              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"
-            />
-            <select
-              value={newStaffHomeId}
-              onChange={(e) => setNewStaffHomeId(parseInt(e.target.value, 10))}
-              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"
-            >
-              {homes.map((h) => (
-                <option key={h.id} value={h.id}>
-                  {h.name}
-                </option>
-              ))}
-            </select>
-            <button type="submit" className="py-2 bg-indigo-600 text-white font-bold rounded-xl text-xs">
-              Add Staff
-            </button>
-          </form>
+        <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Manage Staff & Admin Accounts</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Add new staff or admin users, assign workplace locations, or delete existing user accounts.
+              </p>
+            </div>
+          </div>
 
-          <div className="space-y-3 pt-4">
-            {allUsers.map((u) => (
-              <div key={u.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-200 flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-sm text-slate-800">{u.username} ({u.email})</p>
-                  <p className="text-xs text-slate-500">
-                    Role: <strong className="text-indigo-600 uppercase">{u.role}</strong> • Home: {u.homeName || 'Unassigned'}
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleDeleteUser(u.id)}
-                  className="p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors"
+          {userActionMsg && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-700 text-xs font-medium flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4" /> {userActionMsg}
+            </div>
+          )}
+          {userActionErr && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-rose-700 text-xs font-medium flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" /> {userActionErr}
+            </div>
+          )}
+
+          {/* Add User Form */}
+          <form onSubmit={handleCreateUser} className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
+            <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Create New User Account</h4>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Email</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. sami@videotrain.com"
+                  value={newStaffEmail}
+                  onChange={(e) => setNewStaffEmail(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Username</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. staff_sami"
+                  value={newStaffUsername}
+                  onChange={(e) => setNewStaffUsername(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Account Role</label>
+                <select
+                  value={newStaffRole}
+                  onChange={(e) => setNewStaffRole(e.target.value as 'staff' | 'admin')}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-indigo-700"
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <option value="staff">STAFF (Learning Access)</option>
+                  <option value="admin">ADMIN (Full Admin Access)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Assigned Location</label>
+                <select
+                  value={newStaffHomeId}
+                  onChange={(e) => setNewStaffHomeId(parseInt(e.target.value, 10))}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                >
+                  {homes.map((h) => (
+                    <option key={h.id} value={h.id}>
+                      {h.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  type="submit"
+                  className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-200 transition-all flex items-center justify-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" /> Add User Account
                 </button>
               </div>
-            ))}
+            </div>
+          </form>
+
+          {/* User List */}
+          <div className="space-y-3 pt-2">
+            <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider">
+              Registered Accounts ({allUsers.length})
+            </h4>
+
+            {allUsers.map((u) => {
+              const isSelf = u.id === currentUser.id;
+              const isAdminRole = u.role === 'admin';
+
+              return (
+                <div
+                  key={u.id}
+                  className={`p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-all ${
+                    isAdminRole
+                      ? 'bg-indigo-50/50 border-indigo-200'
+                      : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-10 h-10 rounded-2xl font-bold flex items-center justify-center text-xs shrink-0 ${
+                        isAdminRole
+                          ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200'
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {isAdminRole ? <ShieldCheck className="w-5 h-5" /> : <Users className="w-5 h-5" />}
+                    </div>
+
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-sm text-slate-900">{u.username}</p>
+                        <span className="text-xs text-slate-500">({u.email})</span>
+                      </div>
+
+                      <div className="flex items-center gap-2 mt-1">
+                        <span
+                          className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ${
+                            isAdminRole
+                              ? 'bg-indigo-600 text-white font-mono'
+                              : 'bg-slate-200 text-slate-700 font-mono'
+                          }`}
+                        >
+                          {u.role}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          Home: <strong className="text-slate-800">{u.homeName || 'Unassigned'}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="shrink-0">
+                    {isSelf ? (
+                      <span className="px-3 py-1.5 bg-slate-200/80 text-slate-600 rounded-xl text-xs font-bold flex items-center gap-1">
+                        <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" /> Active Session
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => promptDeleteUser(u)}
+                        className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> Delete {isAdminRole ? 'Admin' : 'Staff'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
 
       {/* 5. COMPLETION REPORTS */}
       {activeSubTab === 'reports' && (
-        <div className="bg-white rounded-[32px] p-8 border border-slate-200 shadow-sm space-y-6">
+        <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
           <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Staff Training Completion Report</h3>
           <div className="space-y-4">
             {reports.map((r) => (
@@ -533,6 +795,48 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           </div>
         </div>
       )}
+
+      {/* DELETE USER CONFIRMATION MODAL */}
+      {userToDelete && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-[28px] max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-100 animate-in fade-in zoom-in-95">
+            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center font-bold">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Confirm User Deletion</h3>
+              <p className="text-xs text-slate-600 mt-1">
+                Are you sure you want to permanently delete the <strong className="text-rose-600 uppercase">{userToDelete.role}</strong> account for <strong className="text-slate-900">{userToDelete.username}</strong> ({userToDelete.email})?
+              </p>
+            </div>
+
+            <div className="p-3 bg-rose-50 border border-rose-100 rounded-2xl text-[11px] text-rose-700 font-medium flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              All training progress data associated with this user will be deleted permanently.
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingUser}
+                onClick={() => setUserToDelete(null)}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingUser}
+                onClick={executeDeleteUser}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-lg shadow-rose-200 transition-all flex items-center gap-1.5"
+              >
+                {isDeletingUser ? 'Deleting Account...' : 'Yes, Delete Account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

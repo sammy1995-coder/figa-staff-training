@@ -28,10 +28,10 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
     totalVideos > 0 ? Math.round((completedVideos.length / totalVideos) * 100) : 0;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-4 gap-6 select-none">
+    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 sm:gap-6 select-none">
       {/* 1. Large Feature Card: Current / Active Training Video */}
-      <div className="md:col-span-2 md:row-span-2 bg-white rounded-[32px] p-6 shadow-xl shadow-slate-200/50 flex flex-col border border-slate-100 hover:border-indigo-100 transition-all">
-        <div className="flex justify-between items-start mb-4">
+      <div className="md:col-span-2 md:row-span-2 bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 shadow-xl shadow-slate-200/50 flex flex-col border border-slate-100 hover:border-indigo-100 transition-all">
+        <div className="flex justify-between items-start mb-3 sm:mb-4">
           <span className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-bold uppercase tracking-wider">
             {activeVideo?.passed ? 'Completed Module' : 'Active Training'}
           </span>
@@ -44,16 +44,16 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
           <>
             <div
               onClick={() => onSelectVideo(activeVideo)}
-              className="flex-1 bg-slate-900 rounded-2xl relative overflow-hidden flex items-center justify-center cursor-pointer group shadow-lg min-h-[220px]"
+              className="flex-1 bg-slate-900 rounded-2xl relative overflow-hidden flex items-center justify-center cursor-pointer group shadow-lg min-h-[180px] sm:min-h-[220px]"
             >
               <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent"></div>
 
-              <div className="w-16 h-16 bg-indigo-600/90 group-hover:bg-indigo-500 rounded-full flex items-center justify-center text-white shadow-xl transform group-hover:scale-110 transition-all z-10">
-                <Play className="w-8 h-8 fill-current ml-1" />
+              <div className="w-14 h-14 sm:w-16 sm:h-16 bg-indigo-600/90 group-hover:bg-indigo-500 rounded-full flex items-center justify-center text-white shadow-xl transform group-hover:scale-110 transition-all z-10">
+                <Play className="w-7 h-7 sm:w-8 sm:h-8 fill-current ml-1" />
               </div>
 
               <div className="absolute bottom-4 left-4 right-4 text-white z-10">
-                <p className="font-bold text-lg leading-snug line-clamp-1">{activeVideo.title}</p>
+                <p className="font-bold text-base sm:text-lg leading-snug line-clamp-1">{activeVideo.title}</p>
                 <div className="w-full h-1.5 bg-white/20 rounded-full mt-2 overflow-hidden">
                   <div
                     className="h-full bg-indigo-500 rounded-full transition-all"
@@ -63,9 +63,9 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
               </div>
             </div>
 
-            <div className="mt-5 flex items-center justify-between">
+            <div className="mt-4 sm:mt-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
               <div>
-                <h3 className="font-bold text-slate-800 text-base">{activeVideo.title}</h3>
+                <h3 className="font-bold text-slate-800 text-sm sm:text-base">{activeVideo.title}</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Mandatory module • Pass 2/3 quiz score to proceed
                 </p>
@@ -73,7 +73,7 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
 
               <button
                 onClick={() => onSelectVideo(activeVideo)}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-2xl font-bold text-xs shadow-lg shadow-indigo-200 transition-all shrink-0"
+                className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-2xl font-bold text-xs shadow-lg shadow-indigo-200 transition-all shrink-0 text-center"
               >
                 {activeVideo.percentage ? 'Resume Video' : 'Start Video'}
               </button>
@@ -87,7 +87,7 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
       </div>
 
       {/* 2. Progress Overview Wheel Card */}
-      <div className="md:col-span-1 bg-gradient-to-br from-indigo-600 to-indigo-700 rounded-[32px] p-6 text-white shadow-xl shadow-indigo-200 flex flex-col justify-between">
+      <div className="md:col-span-1 bg-gradient-to-br from-indigo-600 to-indigo-700 rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 text-white shadow-xl shadow-indigo-200 flex flex-col justify-between">
         <p className="text-indigo-100 text-xs font-bold uppercase tracking-wider">Overall Goal</p>
         <div className="my-4 flex items-center justify-center">
           <div className="relative">
@@ -124,7 +124,7 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
       </div>
 
       {/* 3. Locked / Next Content Card */}
-      <div className="md:col-span-1 bg-white rounded-[32px] p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
+      <div className="md:col-span-1 bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
         <div>
           <div className="w-10 h-10 bg-slate-100 rounded-2xl flex items-center justify-center mb-4 text-slate-400">
             {nextLockedVideo?.passed ? (
@@ -152,7 +152,7 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
       </div>
 
       {/* 4. What's Due Deadlines List */}
-      <div className="md:col-span-2 bg-white rounded-[32px] p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
+      <div className="md:col-span-2 bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
         <div className="flex items-center justify-between mb-4">
           <h4 className="font-bold text-slate-800 text-sm">Assigned Deadlines & Progress</h4>
           <span className="text-xs text-indigo-600 font-bold">Mandatory</span>
@@ -163,20 +163,20 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
             <div
               key={vid.id}
               onClick={() => onSelectVideo(vid)}
-              className="flex items-center gap-4 p-3 hover:bg-slate-50 rounded-2xl cursor-pointer transition-colors border border-transparent hover:border-slate-100"
+              className="flex items-center gap-3 sm:gap-4 p-2.5 sm:p-3 hover:bg-slate-50 rounded-2xl cursor-pointer transition-colors border border-transparent hover:border-slate-100"
             >
               <div
-                className={`w-2 h-10 rounded-full ${
+                className={`w-2 h-10 rounded-full shrink-0 ${
                   vid.passed ? 'bg-emerald-500' : 'bg-amber-400'
                 }`}
               ></div>
               <div className="flex-1 overflow-hidden">
-                <p className="font-semibold text-sm text-slate-800 truncate">{vid.title}</p>
-                <p className="text-xs text-slate-400">
+                <p className="font-semibold text-xs sm:text-sm text-slate-800 truncate">{vid.title}</p>
+                <p className="text-[11px] sm:text-xs text-slate-400 truncate">
                   {vid.passed ? 'Passed (Quiz complete)' : 'In progress • Pass 2/3 quiz required'}
                 </p>
               </div>
-              <span className="text-xs font-bold font-mono text-slate-500 shrink-0">
+              <span className="text-[11px] sm:text-xs font-bold font-mono text-slate-500 shrink-0">
                 {vid.percentage || 0}% DONE
               </span>
             </div>
@@ -185,7 +185,7 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
       </div>
 
       {/* 5. Access Authorization & Home Control */}
-      <div className="md:col-span-2 bg-slate-100 rounded-[32px] p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
+      <div className="md:col-span-2 bg-slate-100 rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 sm:gap-6">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-1">
             <ShieldCheck className="w-4 h-4 text-emerald-600" />

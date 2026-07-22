@@ -13,7 +13,8 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
   // API HEALTH CHECK
   app.get('/api/health', (req, res) => {
@@ -628,9 +629,12 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  app.delete('/api/admin/users/:id', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
     try {
       const userId = parseInt(req.params.id, 10);
+      if (req.user && userId === req.user.id) {
+        return res.status(400).json({ error: 'You cannot delete your own active admin account!' });
+      }
       await db.delete(userProgress).where(eq(userProgress.userId, userId));
       await db.delete(users).where(eq(users.id, userId));
       res.json({ message: 'User deleted successfully' });

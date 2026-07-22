@@ -15,6 +15,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'courses' | 'homes' | 'reports' | 'admin'>('dashboard');
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [showHomeVerifyModal, setShowHomeVerifyModal] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     fetchHomes();
@@ -122,14 +123,17 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         onLogout={handleLogout}
+        isOpenMobile={mobileMenuOpen}
+        onCloseMobile={() => setMobileMenuOpen(false)}
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 p-8 overflow-y-auto flex flex-col">
+      <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto flex flex-col w-full">
         <Header
           user={user}
           currentHome={currentHome}
           onOpenHomeSelector={() => setShowHomeVerifyModal(true)}
+          onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
         />
 
         {/* Tab Views */}

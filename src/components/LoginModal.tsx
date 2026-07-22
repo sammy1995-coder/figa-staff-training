@@ -124,8 +124,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onLoginSuccess, homes })
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-[32px] max-w-md w-full p-8 shadow-2xl border border-slate-100 flex flex-col">
+    <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 z-50 overflow-y-auto">
+      <div className="bg-white rounded-[24px] sm:rounded-[32px] max-w-md w-full p-5 sm:p-8 shadow-2xl border border-slate-100 flex flex-col my-auto max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
           <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white font-bold text-2xl shadow-lg shadow-indigo-200">
@@ -250,15 +250,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onLoginSuccess, homes })
                 {loading ? 'Verifying...' : `Login as ${role === 'admin' ? 'Admin' : 'Staff'}`}
               </button>
             </form>
-
-            <div className="mt-6 pt-4 border-t border-slate-100 text-center">
-              <p className="text-xs text-slate-400">
-                Demo Accounts Available:
-              </p>
-              <div className="mt-2 flex gap-2 justify-center text-[11px] text-slate-600 font-mono">
-                <span className="bg-slate-100 px-2 py-1 rounded-md">staff@videotrain.com / staff_john (Hasset Home)</span>
-              </div>
-            </div>
           </>
         ) : (
           /* OTP Recovery View */

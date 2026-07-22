@@ -107,40 +107,40 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto">
+    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 z-50 overflow-y-auto">
       <div
-        className={`bg-white rounded-[32px] w-full shadow-2xl border border-slate-200 overflow-hidden flex flex-col transition-all ${
+        className={`bg-white rounded-[24px] sm:rounded-[32px] w-full shadow-2xl border border-slate-200 overflow-hidden flex flex-col transition-all ${
           isFullscreen ? 'max-w-6xl h-[90vh]' : 'max-w-4xl max-h-[90vh]'
         }`}
       >
         {/* Modal Top Header */}
-        <div className="bg-slate-900 px-6 py-4 flex items-center justify-between border-b border-slate-800 text-white shrink-0">
-          <div className="flex items-center gap-3">
-            <span className="px-3 py-1 bg-indigo-500/20 text-indigo-300 rounded-full text-xs font-bold uppercase tracking-wider border border-indigo-500/30">
+        <div className="bg-slate-900 px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between border-b border-slate-800 text-white shrink-0">
+          <div className="flex items-center gap-2 sm:gap-3 overflow-hidden">
+            <span className="hidden sm:inline-block px-3 py-1 bg-indigo-500/20 text-indigo-300 rounded-full text-xs font-bold uppercase tracking-wider border border-indigo-500/30 shrink-0">
               Training Module
             </span>
-            <h3 className="text-lg font-bold truncate max-w-md">{video.title}</h3>
+            <h3 className="text-sm sm:text-lg font-bold truncate max-w-[160px] sm:max-w-md">{video.title}</h3>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               onClick={toggleFullscreen}
-              className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors"
+              className="p-1.5 sm:p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors"
               title={isFullscreen ? 'Moderate Size' : 'Full Screen'}
             >
-              {isFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+              {isFullscreen ? <Minimize2 className="w-4 h-4 sm:w-5 sm:h-5" /> : <Maximize2 className="w-4 h-4 sm:w-5 sm:h-5" />}
             </button>
             <button
               onClick={onClose}
-              className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors"
+              className="p-1.5 sm:p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
           </div>
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+        <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-4 sm:space-y-6">
           {!showQuiz ? (
             /* VIDEO WATCHER VIEW */
             <>
