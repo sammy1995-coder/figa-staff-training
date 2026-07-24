@@ -54,6 +54,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [newStaffPassword, setNewStaffPassword] = useState('');
   const [newStaffRole, setNewStaffRole] = useState<'staff' | 'admin'>('staff');
   const [newStaffHomeId, setNewStaffHomeId] = useState<number>(homes[0]?.id || 1);
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [editingRole, setEditingRole] = useState<'staff' | 'admin'>('staff');
+  const [editingHomeId, setEditingHomeId] = useState<number>(homes[0]?.id || 1);
   const [userActionMsg, setUserActionMsg] = useState<string | null>(null);
   const [userActionErr, setUserActionErr] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
@@ -68,6 +71,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       fetchReports();
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (homes.length > 0) {
+      setNewStaffHomeId((current) => (current && homes.some((home) => home.id === current) ? current : homes[0].id));
+      setEditingHomeId((current) => (current && homes.some((home) => home.id === current) ? current : homes[0].id));
+    }
+  }, [homes]);
 
   if (currentUser.role !== 'admin') {
     return (
@@ -272,6 +282,45 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       fetchUsers();
     } catch (e: any) {
       setUserActionErr(e.message || 'Error creating user account');
+    }
+  };
+
+  const startEditUser = (u: User) => {
+    setEditingUserId(u.id);
+    setEditingRole(u.role);
+    setEditingHomeId(u.homeId ?? homes[0]?.id ?? 1);
+    setUserActionErr(null);
+    setUserActionMsg(null);
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUserId) return;
+
+    setUserActionErr(null);
+    setUserActionMsg(null);
+
+    try {
+      const res = await fetch(`/api/admin/users/${editingUserId}`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          role: editingRole,
+          homeId: editingHomeId,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update user');
+
+      setUserActionMsg(`Updated ${editingRole.toUpperCase()} assignment for the selected account.`);
+      setEditingUserId(null);
+      fetchUsers();
+    } catch (e: any) {
+      setUserActionErr(e.message || 'Error updating user account');
     }
   };
 
@@ -779,18 +828,65 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                     </div>
                   </div>
 
-                  <div className="shrink-0">
-                    {isSelf ? (
-                      <span className="px-3 py-1.5 bg-slate-200/80 text-slate-600 rounded-xl text-xs font-bold flex items-center gap-1">
-                        <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" /> Active Session
-                      </span>
+                  <div className="shrink-0 flex flex-wrap items-center gap-2">
+                    {editingUserId === u.id ? (
+                      <form onSubmit={handleUpdateUser} className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={editingRole}
+                          onChange={(e) => setEditingRole(e.target.value as 'staff' | 'admin')}
+                          className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] font-bold text-indigo-700"
+                        >
+                          <option value="staff">STAFF</option>
+                          <option value="admin">ADMIN</option>
+                        </select>
+                        <select
+                          value={editingHomeId}
+                          onChange={(e) => setEditingHomeId(parseInt(e.target.value, 10))}
+                          className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] font-medium"
+                        >
+                          {homes.map((home) => (
+                            <option key={home.id} value={home.id}>
+                              {home.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="submit"
+                          className="px-3 py-1.5 bg-indigo-600 text-white rounded-xl text-xs font-bold"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingUserId(null)}
+                          className="px-3 py-1.5 bg-white text-slate-600 border border-slate-200 rounded-xl text-xs font-bold"
+                        >
+                          Cancel
+                        </button>
+                      </form>
                     ) : (
-                      <button
-                        onClick={() => promptDeleteUser(u)}
-                        className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" /> Delete {isAdminRole ? 'Admin' : 'Staff'}
-                      </button>
+                      <>
+                        {!isSelf && (
+                          <button
+                            onClick={() => startEditUser(u)}
+                            className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-600 hover:text-indigo-700 border border-slate-200 hover:border-indigo-200 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+                          >
+                            <Edit className="w-3.5 h-3.5" /> Edit
+                          </button>
+                        )}
+                        {isSelf ? (
+                          <span className="px-3 py-1.5 bg-slate-200/80 text-slate-600 rounded-xl text-xs font-bold flex items-center gap-1">
+                            <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" /> Active Session
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => promptDeleteUser(u)}
+                            className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Delete {isAdminRole ? 'Admin' : 'Staff'}
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>

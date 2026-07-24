@@ -55,6 +55,50 @@ function sendServerError(res: express.Response, err: any, context: string) {
   });
 }
 
+async function ensureDefaultHomes() {
+  try {
+    const existingHomes = await db
+      .select({ id: homes.id, name: homes.name, code: homes.code })
+      .from(homes)
+      .orderBy(asc(homes.id));
+
+    const desiredHomes = [
+      { name: 'Hasset Group Home', code: 'HGH' },
+      { name: 'Hope Group Home', code: 'HOGH' },
+    ];
+
+    const legacyHome = existingHomes.find((home) => {
+      const name = home.name.toLowerCase();
+      return name.includes('main location') || name.includes('main') || home.code.toLowerCase() === 'main';
+    });
+
+    if (existingHomes.length === 0) {
+      await db.insert(homes).values(desiredHomes);
+      return;
+    }
+
+    const hasHasset = existingHomes.some((home) => home.name.toLowerCase() === 'hasset group home');
+    const hasHope = existingHomes.some((home) => home.name.toLowerCase() === 'hope group home');
+
+    if (!hasHasset && legacyHome) {
+      await db.update(homes).set({ name: 'Hasset Group Home', code: 'HGH' }).where(eq(homes.id, legacyHome.id));
+    } else if (!hasHasset) {
+      await db.insert(homes).values({ name: 'Hasset Group Home', code: 'HGH' });
+    }
+
+    if (!hasHope) {
+      const fallbackHome = existingHomes.find((home) => home.id !== legacyHome?.id && home.name.toLowerCase() !== 'hasset group home');
+      if (fallbackHome) {
+        await db.update(homes).set({ name: 'Hope Group Home', code: 'HOGH' }).where(eq(homes.id, fallbackHome.id));
+      } else {
+        await db.insert(homes).values({ name: 'Hope Group Home', code: 'HOGH' });
+      }
+    }
+  } catch (err: any) {
+    console.error('[ensureDefaultHomes]', err?.message || err);
+  }
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -75,10 +119,16 @@ async function startServer() {
   // ----------------------------------------------------
   // HOMES ENDPOINTS
   // ----------------------------------------------------
+  await ensureDefaultHomes();
+
   app.get('/api/homes', async (req, res) => {
     try {
       const allHomes = await db.select().from(homes).orderBy(asc(homes.id));
-      res.json(allHomes);
+      const visibleHomes = allHomes.filter((home) => {
+        const name = home.name.toLowerCase();
+        return !name.includes('main location') && !name.includes('main') && home.code.toLowerCase() !== 'main';
+      });
+      res.json(visibleHomes);
     } catch (err: any) {
       sendServerError(res, err, 'Error fetching homes');
     }
