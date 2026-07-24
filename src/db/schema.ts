@@ -16,6 +16,7 @@ export const users = pgTable('users', {
   role: text('role').notNull().default('staff'), // 'staff' | 'admin'
   homeId: integer('home_id').references(() => homes.id),
   passwordHash: text('password_hash'),
+  mustChangePassword: boolean('must_change_password').notNull().default(false),
   otpCode: text('otp_code'),
   otpExpiresAt: timestamp('otp_expires_at'),
   createdAt: timestamp('created_at').defaultNow(),

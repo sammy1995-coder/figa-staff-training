@@ -82,9 +82,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     try {
       const res = await fetch('/api/progress/quiz', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': currentUser.id.toString(),
         },
         body: JSON.stringify({
           videoId: video.id,

@@ -51,7 +51,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [newStaffEmail, setNewStaffEmail] = useState('');
   const [newStaffUsername, setNewStaffUsername] = useState('');
-  const [newStaffPassword, setNewStaffPassword] = useState('staff123');
+  const [newStaffPassword, setNewStaffPassword] = useState('');
   const [newStaffRole, setNewStaffRole] = useState<'staff' | 'admin'>('staff');
   const [newStaffHomeId, setNewStaffHomeId] = useState<number>(homes[0]?.id || 1);
   const [userActionMsg, setUserActionMsg] = useState<string | null>(null);
@@ -86,7 +86,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const fetchUsers = async () => {
     try {
       const res = await fetch('/api/admin/users', {
-        headers: { 'X-User-Id': currentUser.id.toString() },
+        credentials: 'include',
       });
       if (res.ok) {
         const data = await res.json();
@@ -100,7 +100,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const fetchReports = async () => {
     try {
       const res = await fetch('/api/admin/reports', {
-        headers: { 'X-User-Id': currentUser.id.toString() },
+        credentials: 'include',
       });
       if (res.ok) {
         const data = await res.json();
@@ -156,9 +156,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     try {
       const res = await fetch('/api/videos', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': currentUser.id.toString(),
         },
         body: JSON.stringify({
           sectionId: selectedSectionId,
@@ -190,9 +190,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     try {
       const res = await fetch('/api/homes', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': currentUser.id.toString(),
         },
         body: JSON.stringify({ name: newHomeName, code: newHomeCode }),
       });
@@ -212,9 +212,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     try {
       const res = await fetch('/api/sections', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': currentUser.id.toString(),
         },
         body: JSON.stringify({ title: newSecTitle, description: newSecDesc }),
       });
@@ -233,22 +233,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     setUserActionErr(null);
     setUserActionMsg(null);
 
-    if (!newStaffEmail || !newStaffUsername) {
-      setUserActionErr('Email and Username are required.');
+    if (!newStaffEmail || !newStaffUsername || !newStaffPassword) {
+      setUserActionErr('Email, Username, and Password are required.');
+      return;
+    }
+    if (newStaffPassword.length < 8) {
+      setUserActionErr('Password must be at least 8 characters.');
       return;
     }
 
     try {
       const res = await fetch('/api/admin/users', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': currentUser.id.toString(),
         },
         body: JSON.stringify({
           email: newStaffEmail,
           username: newStaffUsername,
-          password: newStaffPassword || 'staff123',
+          password: newStaffPassword,
           role: newStaffRole,
           homeId: newStaffHomeId,
         }),
@@ -259,10 +263,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
         throw new Error(data.error || 'Failed to create user');
       }
 
-      setUserActionMsg(`New ${newStaffRole.toUpperCase()} account created for ${newStaffUsername}!`);
+      setUserActionMsg(
+        `New ${newStaffRole.toUpperCase()} account created for ${newStaffUsername}. They'll be asked to choose their own password the first time they log in.`
+      );
       setNewStaffEmail('');
       setNewStaffUsername('');
-      setNewStaffPassword('staff123');
+      setNewStaffPassword('');
       fetchUsers();
     } catch (e: any) {
       setUserActionErr(e.message || 'Error creating user account');
@@ -291,7 +297,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     try {
       const res = await fetch(`/api/admin/users/${userToDelete.id}`, {
         method: 'DELETE',
-        headers: { 'X-User-Id': currentUser.id.toString() },
+        credentials: 'include',
       });
 
       const data = await res.json();
@@ -636,7 +642,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           <form onSubmit={handleCreateUser} className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
             <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Create New User Account</h4>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Email</label>
                 <input
@@ -658,6 +664,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                   value={newStaffUsername}
                   onChange={(e) => setNewStaffUsername(e.target.value)}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Initial Password</label>
+                <input
+                  type="text"
+                  required
+                  minLength={8}
+                  placeholder="At least 8 characters"
+                  value={newStaffPassword}
+                  onChange={(e) => setNewStaffPassword(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-mono"
                 />
               </div>
 
@@ -697,6 +716,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                 </button>
               </div>
             </div>
+            <p className="text-[11px] text-slate-500">
+              The user will be required to set their own password the first time they log in with this one.
+            </p>
           </form>
 
           {/* User List */}
@@ -748,6 +770,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                         <span className="text-xs text-slate-500">
                           Home: <strong className="text-slate-800">{u.homeName || 'Unassigned'}</strong>
                         </span>
+                        {u.mustChangePassword && (
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-100 text-amber-700">
+                            Awaiting first login
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
