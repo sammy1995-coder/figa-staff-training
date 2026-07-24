@@ -13,6 +13,45 @@ export interface User {
   homeId: number | null;
   homeName?: string;
   otpCode?: string;
+  mustChangePassword?: boolean;
+}
+
+export interface Course {
+  id: number;
+  title: string;
+  description: string;
+  orderNum: number;
+  videos: Video[];
+  required?: boolean;
+  dateAdded?: string;
+}
+
+export interface VideoDetail extends Video {
+  sectionId: number;
+  sectionTitle?: string;
+  progress: {
+    percentage: number;
+    watchedFinished: boolean;
+    quizCompleted: boolean;
+    quizScore: number;
+    passed: boolean;
+  };
+}
+
+export interface ProgressSummary {
+  totalVideos: number;
+  completedVideos: number;
+  outstandingVideos: number;
+  completedCourses: number;
+  inProgressCourses: number;
+}
+
+export interface CompletionHistoryItem {
+  videoCode: string;
+  videoTitle: string;
+  courseTitle: string;
+  completedAt: string;
+  passed: boolean;
 }
 
 export interface QuizQuestion {
@@ -32,12 +71,18 @@ export interface Video {
   url: string;
   durationSeconds: number;
   orderNum: number;
+  code?: string;
+  level?: 'Beginner' | 'Intermediate' | 'Advanced' | 'Standard';
+  attachmentUrl?: string;
+  required?: boolean;
   percentage?: number;
   watchedFinished?: boolean;
   quizCompleted?: boolean;
   quizScore?: number;
   passed?: boolean;
   quizQuestions?: QuizQuestion[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Section {
@@ -46,6 +91,8 @@ export interface Section {
   description: string;
   orderNum: number;
   videos: Video[];
+  required?: boolean;
+  createdAt?: string;
 }
 
 export interface UserProgress {

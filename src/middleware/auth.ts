@@ -4,6 +4,7 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { db } from '../db/index.ts';
 import { users, homes } from '../db/schema.ts';
 import { eq } from 'drizzle-orm';
+import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from '../lib/session.ts';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -23,7 +24,6 @@ export const requireAuth = async (
   next: NextFunction
 ) => {
   const authHeader = req.headers.authorization;
-  const customUserId = req.headers['x-user-id'] as string;
 
   try {
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -57,39 +57,43 @@ export const requireAuth = async (
           return next();
         }
       } catch (fbErr) {
-        // Fall through to custom auth header if token wasn't a valid Firebase JWT
+        // Fall through to the server-issued session cookie if the token
+        // wasn't a valid Firebase JWT.
       }
     }
 
-    if (customUserId) {
-      const userIdNum = parseInt(customUserId, 10);
-      if (!isNaN(userIdNum)) {
-        const [dbUser] = await db
-          .select({
-            id: users.id,
-            uid: users.uid,
-            email: users.email,
-            username: users.username,
-            role: users.role,
-            homeId: users.homeId,
-            homeName: homes.name,
-          })
-          .from(users)
-          .leftJoin(homes, eq(users.homeId, homes.id))
-          .where(eq(users.id, userIdNum));
+    // Server-signed session cookie set by POST /api/auth/login. This is the
+    // only other trusted identity source — a client-supplied user id header
+    // is never honored, since that would let any caller impersonate anyone.
+    const cookies = parseCookies(req);
+    const sessionUserId = verifySessionToken(cookies[SESSION_COOKIE_NAME]);
 
-        if (dbUser) {
-          req.user = {
-            id: dbUser.id,
-            uid: dbUser.uid,
-            email: dbUser.email,
-            username: dbUser.username,
-            role: dbUser.role,
-            homeId: dbUser.homeId,
-            homeName: dbUser.homeName || undefined,
-          };
-          return next();
-        }
+    if (sessionUserId !== null) {
+      const [dbUser] = await db
+        .select({
+          id: users.id,
+          uid: users.uid,
+          email: users.email,
+          username: users.username,
+          role: users.role,
+          homeId: users.homeId,
+          homeName: homes.name,
+        })
+        .from(users)
+        .leftJoin(homes, eq(users.homeId, homes.id))
+        .where(eq(users.id, sessionUserId));
+
+      if (dbUser) {
+        req.user = {
+          id: dbUser.id,
+          uid: dbUser.uid,
+          email: dbUser.email,
+          username: dbUser.username,
+          role: dbUser.role,
+          homeId: dbUser.homeId,
+          homeName: dbUser.homeName || undefined,
+        };
+        return next();
       }
     }
 

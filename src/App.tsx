@@ -16,9 +16,11 @@ export default function App() {
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [showHomeVerifyModal, setShowHomeVerifyModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
     fetchHomes();
+    restoreSession();
   }, []);
 
   useEffect(() => {
@@ -31,6 +33,20 @@ export default function App() {
       setActiveTab('dashboard');
     }
   }, [user]);
+
+  const restoreSession = async () => {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setUser(data.user);
+      }
+    } catch (err) {
+      console.error('Failed to restore session:', err);
+    } finally {
+      setCheckingSession(false);
+    }
+  };
 
   const fetchHomes = async () => {
     try {
@@ -46,11 +62,7 @@ export default function App() {
 
   const fetchSections = async () => {
     try {
-      const res = await fetch('/api/sections', {
-        headers: {
-          'X-User-Id': user ? user.id.toString() : '1',
-        },
-      });
+      const res = await fetch('/api/sections', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setSections(data);
@@ -62,7 +74,12 @@ export default function App() {
 
   const currentHome = homes.find((h) => h.id === user?.homeId) || homes[0] || null;
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch (err) {
+      console.error('Failed to log out cleanly:', err);
+    }
     setUser(null);
     setSelectedVideo(null);
     setActiveTab('dashboard');
@@ -73,9 +90,9 @@ export default function App() {
     try {
       await fetch('/api/progress/watch', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': user.id.toString(),
         },
         body: JSON.stringify({ videoId, percentage }),
       });
@@ -102,6 +119,14 @@ export default function App() {
   const handleQuizComplete = (videoId: number, score: number, passed: boolean) => {
     fetchSections();
   };
+
+  if (checkingSession) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#f1f5f9]">
+        <div className="text-sm font-semibold text-slate-500">Loading...</div>
+      </div>
+    );
+  }
 
   if (!user) {
     return (

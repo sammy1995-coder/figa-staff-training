@@ -2,12 +2,58 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import * as dotenv from 'dotenv';
-import { db } from './src/db/index.ts';
+import { db, checkDatabaseConnection, closeDatabasePool } from './src/db/index.ts';
 import { homes, users, sections, videos, quizQuestions, userProgress } from './src/db/schema.ts';
 import { eq, and, sql, asc } from 'drizzle-orm';
 import { requireAuth, requireAdmin, AuthRequest } from './src/middleware/auth.ts';
+import {
+  createSessionToken,
+  getSessionCookieOptions,
+  SESSION_COOKIE_NAME,
+  createPasswordChangeToken,
+  verifyPasswordChangeToken,
+} from './src/lib/session.ts';
+import { hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from './src/lib/password.ts';
+import { sendOtpEmail, EmailNotConfiguredError } from './src/lib/mailer.ts';
 
-dotenv.config();
+dotenv.config({ quiet: true });
+
+// A database connection failure surfaces very differently depending on the
+// driver/OS (ECONNREFUSED, ENOTFOUND, auth failures, etc). Centralizing the
+// classification keeps every route's catch block honest: log the real error,
+// but only ever send the client a safe, generic message.
+function isDatabaseConnectivityError(err: any): boolean {
+  // Drizzle wraps the underlying pg/network error in its own error with the
+  // real one on `.cause` — check both so the classification survives that
+  // wrapping instead of silently falling through to a generic 500.
+  const code = err?.code || err?.cause?.code;
+  return (
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'ETIMEDOUT' ||
+    code === '28P01' || // invalid password
+    code === '3D000' || // database does not exist
+    code === '28000' // invalid authorization
+  );
+}
+
+function sendServerError(res: express.Response, err: any, context: string) {
+  console.error(`[${context}]`, err?.message || err);
+  if (isDatabaseConnectivityError(err)) {
+    return res.status(503).json({
+      error: {
+        code: 'DATABASE_UNAVAILABLE',
+        message: 'The service is temporarily unavailable. Please try again shortly.',
+      },
+    });
+  }
+  return res.status(500).json({
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: 'Something went wrong. Please try again or contact an administrator.',
+    },
+  });
+}
 
 async function startServer() {
   const app = express();
@@ -17,8 +63,13 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
   // API HEALTH CHECK
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  app.get('/api/health', async (req, res) => {
+    const dbStatus = await checkDatabaseConnection();
+    res.json({
+      status: dbStatus.ok ? 'ok' : 'degraded',
+      database: dbStatus.ok ? 'connected' : 'unavailable',
+      timestamp: new Date().toISOString(),
+    });
   });
 
   // ----------------------------------------------------
@@ -29,8 +80,7 @@ async function startServer() {
       const allHomes = await db.select().from(homes).orderBy(asc(homes.id));
       res.json(allHomes);
     } catch (err: any) {
-      console.error('Error fetching homes:', err);
-      res.status(500).json({ error: 'Failed to fetch homes' });
+      sendServerError(res, err, 'Error fetching homes');
     }
   });
 
@@ -47,8 +97,7 @@ async function startServer() {
         .returning();
       res.status(201).json(newHome);
     } catch (err: any) {
-      console.error('Error creating home:', err);
-      res.status(500).json({ error: err.message || 'Failed to create home' });
+      sendServerError(res, err, 'Error creating home');
     }
   });
 
@@ -57,13 +106,13 @@ async function startServer() {
   // ----------------------------------------------------
   app.post('/api/auth/login', async (req, res) => {
     try {
-      const { email, username, homeId, role } = req.body;
+      const { identifier, password, homeId, role } = req.body;
 
-      if (!email || !username) {
-        return res.status(400).json({ error: 'Email and username are required' });
+      if (!identifier || !password) {
+        return res.status(400).json({ error: 'Email/username and password are required' });
       }
 
-      // Find user matching email and username
+      // Find user matching email OR username
       const [user] = await db
         .select({
           id: users.id,
@@ -73,19 +122,24 @@ async function startServer() {
           role: users.role,
           homeId: users.homeId,
           homeName: homes.name,
+          passwordHash: users.passwordHash,
+          mustChangePassword: users.mustChangePassword,
         })
         .from(users)
         .leftJoin(homes, eq(users.homeId, homes.id))
         .where(
-          and(
-            sql`LOWER(${users.email}) = LOWER(${email})`,
-            sql`LOWER(${users.username}) = LOWER(${username})`
-          )
+          sql`LOWER(${users.email}) = LOWER(${identifier}) OR LOWER(${users.username}) = LOWER(${identifier})`
         );
 
-      if (!user) {
+      // Always run a bcrypt comparison, even for an unknown user, against a
+      // fixed dummy hash — otherwise a missing account short-circuits before
+      // hashing while a wrong password takes the full bcrypt round-trip,
+      // letting an attacker time-distinguish valid emails/usernames.
+      const passwordOk = await verifyPassword(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+
+      if (!user || !passwordOk) {
         return res.status(401).json({
-          error: 'Invalid credentials. User with this email and username was not found.',
+          error: 'Invalid credentials. Please check your email/username and password.',
         });
       }
 
@@ -105,6 +159,24 @@ async function startServer() {
         }
       }
 
+      // An admin-set initial password must be changed before the account
+      // gets a real session — hand back a short-lived, single-purpose token
+      // instead of logging them in.
+      if (user.mustChangePassword) {
+        const changeToken = createPasswordChangeToken(user.id);
+        return res.json({
+          requiresPasswordChange: true,
+          changeToken,
+          message: 'Your password was set by an administrator. Please choose a new password to continue.',
+        });
+      }
+
+      // Issue a signed, httpOnly session cookie. Downstream requests are
+      // authenticated from this cookie server-side — the client never gets
+      // to assert its own user id again after this point.
+      const sessionToken = createSessionToken(user.id);
+      res.cookie(SESSION_COOKIE_NAME, sessionToken, getSessionCookieOptions());
+
       res.json({
         message: 'Login successful',
         user: {
@@ -118,15 +190,71 @@ async function startServer() {
         },
       });
     } catch (err: any) {
-      console.error('Login error:', err);
-      res.status(500).json({ error: 'An error occurred during login' });
+      sendServerError(res, err, 'auth/login');
     }
   });
 
-  // Request OTP for password/email retrieval
-  app.post('/api/auth/request-otp', async (req, res) => {
+  app.post('/api/auth/logout', (req, res) => {
+    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+    res.json({ message: 'Logged out successfully' });
+  });
+
+  // Completes the forced first-login password change. Requires the
+  // short-lived changeToken issued by /api/auth/login, not a session cookie
+  // — the account isn't fully logged in until this succeeds.
+  app.post('/api/auth/set-initial-password', async (req, res) => {
     try {
-      const { email, username } = req.body;
+      const { changeToken, newPassword } = req.body;
+      if (!changeToken || !newPassword) {
+        return res.status(400).json({ error: 'A change token and new password are required' });
+      }
+      if (newPassword.length < 8) {
+        return res.status(400).json({ error: 'New password must be at least 8 characters' });
+      }
+
+      const userId = verifyPasswordChangeToken(changeToken);
+      if (userId === null) {
+        return res.status(401).json({ error: 'This password-change link has expired. Please log in again.' });
+      }
+
+      const newPasswordHash = await hashPassword(newPassword);
+      const [updated] = await db
+        .update(users)
+        .set({ passwordHash: newPasswordHash, mustChangePassword: false })
+        .where(eq(users.id, userId))
+        .returning({
+          id: users.id,
+          uid: users.uid,
+          email: users.email,
+          username: users.username,
+          role: users.role,
+          homeId: users.homeId,
+        });
+
+      if (!updated) {
+        return res.status(401).json({ error: 'Account not found' });
+      }
+
+      // Password is set — log them in for real now.
+      const sessionToken = createSessionToken(updated.id);
+      res.cookie(SESSION_COOKIE_NAME, sessionToken, getSessionCookieOptions());
+
+      res.json({ message: 'Password set successfully', user: updated });
+    } catch (err: any) {
+      sendServerError(res, err, 'auth/set-initial-password');
+    }
+  });
+
+  // Request a password-reset OTP. Always responds with the same generic
+  // message whether or not the email is registered, so this endpoint can't
+  // be used to enumerate valid accounts.
+  app.post('/api/auth/request-otp', async (req, res) => {
+    const genericResponse = {
+      message: 'If an account exists for that email, a verification code has been sent to it.',
+    };
+
+    try {
+      const { email } = req.body;
       if (!email) {
         return res.status(400).json({ error: 'Email is required' });
       }
@@ -137,36 +265,47 @@ async function startServer() {
         .where(sql`LOWER(${users.email}) = LOWER(${email})`);
 
       if (!user) {
-        return res.status(404).json({ error: 'No account found with this email' });
+        return res.json(genericResponse);
       }
 
-      // Generate 6 digit OTP
       const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
       const otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
 
-      await db
-        .update(users)
-        .set({ otpCode, otpExpiresAt })
-        .where(eq(users.id, user.id));
+      try {
+        await sendOtpEmail(user.email, otpCode);
+      } catch (mailErr: any) {
+        if (mailErr instanceof EmailNotConfiguredError) {
+          console.error('[auth/request-otp] Email is not configured:', mailErr.message);
+          return res.status(503).json({
+            error: {
+              code: 'EMAIL_UNAVAILABLE',
+              message:
+                'Password reset emails are not available right now. Please contact an administrator.',
+            },
+          });
+        }
+        throw mailErr;
+      }
 
-      res.json({
-        message: 'OTP generated successfully',
-        otpCode, // Returned for staff retrieval
-        username: user.username,
-        email: user.email,
-      });
+      // Only persist the OTP once the email actually went out, so a failed
+      // send never leaves a valid-but-undelivered code sitting in the DB.
+      await db.update(users).set({ otpCode, otpExpiresAt }).where(eq(users.id, user.id));
+
+      res.json(genericResponse);
     } catch (err: any) {
-      console.error('OTP request error:', err);
-      res.status(500).json({ error: 'Failed to generate OTP' });
+      sendServerError(res, err, 'OTP request error');
     }
   });
 
-  // Verify OTP and reset credentials or retrieve details
+  // Verify an emailed OTP and set a new password.
   app.post('/api/auth/verify-otp', async (req, res) => {
     try {
       const { email, otpCode, newPassword } = req.body;
-      if (!email || !otpCode) {
-        return res.status(400).json({ error: 'Email and OTP code are required' });
+      if (!email || !otpCode || !newPassword) {
+        return res.status(400).json({ error: 'Email, OTP code, and a new password are required' });
+      }
+      if (newPassword.length < 8) {
+        return res.status(400).json({ error: 'New password must be at least 8 characters' });
       }
 
       const [user] = await db
@@ -175,32 +314,30 @@ async function startServer() {
         .where(sql`LOWER(${users.email}) = LOWER(${email})`);
 
       if (!user) {
-        return res.status(404).json({ error: 'Account not found' });
+        return res.status(400).json({ error: 'Invalid or expired verification code' });
       }
 
       if (!user.otpCode || user.otpCode !== otpCode) {
-        return res.status(400).json({ error: 'Invalid OTP code' });
+        return res.status(400).json({ error: 'Invalid verification code' });
       }
 
       if (user.otpExpiresAt && new Date(user.otpExpiresAt) < new Date()) {
-        return res.status(400).json({ error: 'OTP code has expired' });
+        return res.status(400).json({ error: 'Verification code has expired' });
       }
 
-      if (newPassword) {
-        await db
-          .update(users)
-          .set({ passwordHash: newPassword, otpCode: null, otpExpiresAt: null })
-          .where(eq(users.id, user.id));
-      }
+      const newPasswordHash = await hashPassword(newPassword);
+      await db
+        .update(users)
+        .set({ passwordHash: newPasswordHash, mustChangePassword: false, otpCode: null, otpExpiresAt: null })
+        .where(eq(users.id, user.id));
 
       res.json({
-        message: 'OTP verified successfully. Account recovered.',
+        message: 'Password reset successfully. You can now log in with your new password.',
         username: user.username,
         email: user.email,
       });
     } catch (err: any) {
-      console.error('OTP verify error:', err);
-      res.status(500).json({ error: 'Failed to verify OTP' });
+      sendServerError(res, err, 'OTP verify error');
     }
   });
 
@@ -249,8 +386,7 @@ async function startServer() {
 
       res.json(result);
     } catch (err: any) {
-      console.error('Error fetching sections:', err);
-      res.status(500).json({ error: 'Failed to fetch sections' });
+      sendServerError(res, err, 'Error fetching sections');
     }
   });
 
@@ -276,8 +412,7 @@ async function startServer() {
 
       res.status(201).json(newSec);
     } catch (err: any) {
-      console.error('Error creating section:', err);
-      res.status(500).json({ error: 'Failed to create section' });
+      sendServerError(res, err, 'Error creating section');
     }
   });
 
@@ -294,8 +429,7 @@ async function startServer() {
 
       res.json(updated);
     } catch (err: any) {
-      console.error('Error updating section:', err);
-      res.status(500).json({ error: 'Failed to update section' });
+      sendServerError(res, err, 'Error updating section');
     }
   });
 
@@ -305,8 +439,7 @@ async function startServer() {
       await db.delete(sections).where(eq(sections.id, sectionId));
       res.json({ message: 'Section deleted successfully' });
     } catch (err: any) {
-      console.error('Error deleting section:', err);
-      res.status(500).json({ error: 'Failed to delete section' });
+      sendServerError(res, err, 'Error deleting section');
     }
   });
 
@@ -346,8 +479,7 @@ async function startServer() {
         },
       });
     } catch (err: any) {
-      console.error('Error fetching video:', err);
-      res.status(500).json({ error: 'Failed to fetch video details' });
+      sendServerError(res, err, 'Error fetching video');
     }
   });
 
@@ -391,8 +523,7 @@ async function startServer() {
 
       res.status(201).json(newVid);
     } catch (err: any) {
-      console.error('Error creating video:', err);
-      res.status(500).json({ error: 'Failed to create video' });
+      sendServerError(res, err, 'Error creating video');
     }
   });
 
@@ -404,8 +535,7 @@ async function startServer() {
       await db.delete(videos).where(eq(videos.id, videoId));
       res.json({ message: 'Video deleted successfully' });
     } catch (err: any) {
-      console.error('Error deleting video:', err);
-      res.status(500).json({ error: 'Failed to delete video' });
+      sendServerError(res, err, 'Error deleting video');
     }
   });
 
@@ -463,8 +593,7 @@ async function startServer() {
         return res.json(inserted);
       }
     } catch (err: any) {
-      console.error('Error updating watch progress:', err);
-      res.status(500).json({ error: 'Failed to save progress' });
+      sendServerError(res, err, 'Error updating watch progress');
     }
   });
 
@@ -542,8 +671,7 @@ async function startServer() {
         progress: updatedProg,
       });
     } catch (err: any) {
-      console.error('Error submitting quiz:', err);
-      res.status(500).json({ error: 'Failed to process quiz submission' });
+      sendServerError(res, err, 'Error submitting quiz');
     }
   });
 
@@ -561,7 +689,7 @@ async function startServer() {
           role: users.role,
           homeId: users.homeId,
           homeName: homes.name,
-          otpCode: users.otpCode,
+          mustChangePassword: users.mustChangePassword,
           createdAt: users.createdAt,
         })
         .from(users)
@@ -570,8 +698,7 @@ async function startServer() {
 
       res.json(allUsers);
     } catch (err: any) {
-      console.error('Error fetching users:', err);
-      res.status(500).json({ error: 'Failed to fetch users' });
+      sendServerError(res, err, 'Error fetching users');
     }
   });
 
@@ -579,11 +706,15 @@ async function startServer() {
     try {
       const { email, username, role, homeId, password } = req.body;
 
-      if (!email || !username) {
-        return res.status(400).json({ error: 'Email and username are required' });
+      if (!email || !username || !password) {
+        return res.status(400).json({ error: 'Email, username, and password are required' });
+      }
+      if (password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters' });
       }
 
       const customUid = `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const passwordHash = await hashPassword(password);
 
       const [newUser] = await db
         .insert(users)
@@ -593,14 +724,23 @@ async function startServer() {
           username,
           role: role || 'staff',
           homeId: homeId ? parseInt(homeId, 10) : null,
-          passwordHash: password || 'staff123',
+          passwordHash,
+          // The admin set this password directly, so force the user to pick
+          // their own the first time they log in with it.
+          mustChangePassword: true,
         })
-        .returning();
+        .returning({
+          id: users.id,
+          uid: users.uid,
+          email: users.email,
+          username: users.username,
+          role: users.role,
+          homeId: users.homeId,
+        });
 
       res.status(201).json(newUser);
     } catch (err: any) {
-      console.error('Error creating user:', err);
-      res.status(500).json({ error: err.message || 'Failed to create user' });
+      sendServerError(res, err, 'Error creating user');
     }
   });
 
@@ -609,23 +749,38 @@ async function startServer() {
       const userId = parseInt(req.params.id, 10);
       const { email, username, role, homeId, password } = req.body;
 
+      if (password && password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters' });
+      }
+
       const updateData: any = {};
       if (email) updateData.email = email;
       if (username) updateData.username = username;
       if (role) updateData.role = role;
       if (homeId !== undefined) updateData.homeId = homeId ? parseInt(homeId, 10) : null;
-      if (password) updateData.passwordHash = password;
+      if (password) {
+        updateData.passwordHash = await hashPassword(password);
+        // Same reasoning as account creation: an admin-set password must be
+        // changed by the user before it's trusted long-term.
+        updateData.mustChangePassword = true;
+      }
 
       const [updated] = await db
         .update(users)
         .set(updateData)
         .where(eq(users.id, userId))
-        .returning();
+        .returning({
+          id: users.id,
+          uid: users.uid,
+          email: users.email,
+          username: users.username,
+          role: users.role,
+          homeId: users.homeId,
+        });
 
       res.json(updated);
     } catch (err: any) {
-      console.error('Error updating user:', err);
-      res.status(500).json({ error: 'Failed to update user' });
+      sendServerError(res, err, 'Error updating user');
     }
   });
 
@@ -639,8 +794,7 @@ async function startServer() {
       await db.delete(users).where(eq(users.id, userId));
       res.json({ message: 'User deleted successfully' });
     } catch (err: any) {
-      console.error('Error deleting user:', err);
-      res.status(500).json({ error: 'Failed to delete user' });
+      sendServerError(res, err, 'Error deleting user');
     }
   });
 
@@ -681,8 +835,7 @@ async function startServer() {
 
       res.json(reports);
     } catch (err: any) {
-      console.error('Error generating report:', err);
-      res.status(500).json({ error: 'Failed to generate progress report' });
+      sendServerError(res, err, 'Error generating report');
     }
   });
 
@@ -703,9 +856,34 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
+
+  // Report DB reachability at startup without blocking the server from
+  // coming up — routes already degrade gracefully via sendServerError.
+  (async () => {
+    const status = await checkDatabaseConnection();
+    if (!status.ok) {
+      console.error(
+        `[db] Could not reach the database: ${status.error}. ` +
+          `Check DATABASE_URL / SQL_HOST, SQL_DB_NAME, SQL_USER, SQL_PASSWORD in your .env file, ` +
+          `and confirm the database server is running and reachable. API requests will return 503 until this is resolved.`
+      );
+      return;
+    }
+    console.log('[db] Connected successfully.');
+  })();
+
+  const shutdown = async (signal: string) => {
+    console.log(`[server] Received ${signal}, shutting down...`);
+    server.close(() => console.log('[server] HTTP server closed.'));
+    await closeDatabasePool();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 startServer();
