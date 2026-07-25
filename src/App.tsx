@@ -1,18 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { Home, User, Section, Video } from './types';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, ActiveTab } from './components/Sidebar';
 import { Header } from './components/Header';
 import { LoginModal } from './components/LoginModal';
 import { BentoDashboard } from './components/BentoDashboard';
 import { CourseCatalog } from './components/CourseCatalog';
 import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { AdminPanel } from './components/AdminPanel';
+import { AdminDashboard } from './components/admin/AdminDashboard';
+import { AssignTraining } from './components/admin/AssignTraining';
+import { StaffReports } from './components/admin/StaffReports';
+import { StaffDetail } from './components/admin/StaffDetail';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [homes, setHomes] = useState<Home[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'courses' | 'homes' | 'reports' | 'admin'>('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [selectedStaffId, setSelectedStaffId] = useState<number | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [showHomeVerifyModal, setShowHomeVerifyModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -25,14 +30,31 @@ export default function App() {
 
   useEffect(() => {
     if (user) {
-      if (user.role !== 'admin' && activeTab === 'admin') {
-        setActiveTab('dashboard');
-      }
       fetchSections();
     } else {
       setActiveTab('dashboard');
     }
   }, [user]);
+
+  // Best-effort URL sync for /admin/staff/:id — supports refresh/back-button
+  // without pulling in a router dependency for one page.
+  useEffect(() => {
+    if (!user || user.role !== 'admin') return;
+    const match = window.location.pathname.match(/^\/admin\/staff\/(\d+)/);
+    if (match) {
+      setSelectedStaffId(parseInt(match[1], 10));
+      setActiveTab('reports');
+    }
+  }, [user]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const match = window.location.pathname.match(/^\/admin\/staff\/(\d+)/);
+      setSelectedStaffId(match ? parseInt(match[1], 10) : null);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const restoreSession = async () => {
     try {
@@ -62,7 +84,10 @@ export default function App() {
 
   const fetchSections = async () => {
     try {
-      const res = await fetch('/api/sections', { credentials: 'include' });
+      // Admins manage archived content too — staff never receive it (the
+      // server ignores this param for non-admins regardless).
+      const query = user?.role === 'admin' ? '?includeArchived=true' : '';
+      const res = await fetch(`/api/sections${query}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setSections(data);
@@ -82,42 +107,47 @@ export default function App() {
     }
     setUser(null);
     setSelectedVideo(null);
+    setSelectedStaffId(null);
     setActiveTab('dashboard');
   };
 
-  const handleProgressUpdate = async (videoId: number, percentage: number) => {
-    if (!user) return;
-    try {
-      await fetch('/api/progress/watch', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ videoId, percentage }),
-      });
-      // Update local state optimistically
-      setSections((prevSecs) =>
-        prevSecs.map((sec) => ({
-          ...sec,
-          videos: sec.videos.map((vid) =>
-            vid.id === videoId
-              ? {
-                  ...vid,
-                  percentage: Math.max(vid.percentage || 0, percentage),
-                  watchedFinished: percentage >= 95 || vid.watchedFinished,
-                }
-              : vid
-          ),
-        }))
-      );
-    } catch (err) {
-      console.error('Failed to save watch progress:', err);
+  // Purely a local/optimistic UI update for course-list cards — actual
+  // server persistence now happens inside VideoPlayerModal via watch
+  // sessions (src/lib/videoTracking.ts), not this callback.
+  const handleProgressUpdate = (videoId: number, percentage: number) => {
+    setSections((prevSecs) =>
+      prevSecs.map((sec) => ({
+        ...sec,
+        videos: sec.videos.map((vid) =>
+          vid.id === videoId
+            ? {
+                ...vid,
+                percentage: Math.max(vid.percentage || 0, percentage),
+                watchedFinished: percentage >= 95 || vid.watchedFinished,
+              }
+            : vid
+        ),
+      }))
+    );
+  };
+
+  const handleQuizComplete = () => {
+    fetchSections();
+  };
+
+  const handleSelectStaff = (staffId: number) => {
+    setSelectedStaffId(staffId);
+    if (window.history?.pushState) {
+      window.history.pushState({}, '', `/admin/staff/${staffId}`);
     }
   };
 
-  const handleQuizComplete = (videoId: number, score: number, passed: boolean) => {
-    fetchSections();
+  const handleSetActiveTab = (tab: ActiveTab) => {
+    setSelectedStaffId(null);
+    setActiveTab(tab);
+    if (window.history?.pushState) {
+      window.history.pushState({}, '', '/');
+    }
   };
 
   if (checkingSession) {
@@ -140,13 +170,15 @@ export default function App() {
     );
   }
 
+  const isAdmin = user.role === 'admin';
+
   return (
     <div className="flex h-screen bg-[#f1f5f9] font-sans overflow-hidden">
       {/* Sidebar Navigation */}
       <Sidebar
         user={user}
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={handleSetActiveTab}
         onLogout={handleLogout}
         isOpenMobile={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
@@ -162,33 +194,24 @@ export default function App() {
         />
 
         {/* Tab Views */}
-        {activeTab === 'dashboard' && (
-          <BentoDashboard
-            user={user}
-            currentHome={currentHome}
-            sections={sections}
-            onSelectVideo={(vid) => setSelectedVideo(vid)}
-            onOpenHomeSelector={() => setShowHomeVerifyModal(true)}
-          />
-        )}
-
-        {activeTab === 'courses' && (
-          <CourseCatalog
-            sections={sections}
-            onSelectVideo={(vid) => setSelectedVideo(vid)}
-          />
-        )}
-
-        {activeTab === 'admin' && user.role === 'admin' && (
-          <AdminPanel
-            currentUser={user}
-            sections={sections}
-            homes={homes}
-            onRefreshData={() => {
-              fetchHomes();
-              fetchSections();
-            }}
-          />
+        {isAdmin ? (
+          selectedStaffId !== null ? (
+            <StaffDetail staffId={selectedStaffId} onBack={() => setSelectedStaffId(null)} />
+          ) : (
+            <>
+              {activeTab === 'dashboard' && <AdminDashboard onNavigate={handleSetActiveTab} />}
+              {activeTab === 'assign' && <AssignTraining sections={sections} />}
+              {activeTab === 'manage' && (
+                <AdminPanel currentUser={user} sections={sections} homes={homes} onRefreshData={() => { fetchHomes(); fetchSections(); }} />
+              )}
+              {activeTab === 'reports' && <StaffReports onSelectStaff={handleSelectStaff} />}
+            </>
+          )
+        ) : (
+          <>
+            {activeTab === 'dashboard' && <BentoDashboard sections={sections} onSelectVideo={(vid) => setSelectedVideo(vid)} />}
+            {activeTab === 'courses' && <CourseCatalog sections={sections} onSelectVideo={(vid) => setSelectedVideo(vid)} />}
+          </>
         )}
 
         {/* Video Player & Quiz Modal */}

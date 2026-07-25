@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Section, Home, User, StaffReport } from '../types';
-import { Plus, Video, Users, Building2, BarChart3, Trash2, Edit, AlertCircle, CheckCircle2, ShieldCheck, KeyRound, Upload, Link as LinkIcon, FileVideo, ShieldAlert } from 'lucide-react';
+import { Section, Home, User, Video as VideoType } from '../types';
+import { Plus, Video, Users, Building2, Trash2, AlertCircle, CheckCircle2, ShieldCheck, Youtube, Archive, ArchiveRestore } from 'lucide-react';
+import { extractYouTubeVideoId } from '../lib/youtube';
+import { ConfirmDialog } from './ConfirmDialog';
 
 interface AdminPanelProps {
   currentUser: User;
@@ -10,16 +12,13 @@ interface AdminPanelProps {
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, homes, onRefreshData }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'upload' | 'sections' | 'homes' | 'users' | 'reports'>('upload');
+  const [activeSubTab, setActiveSubTab] = useState<'upload' | 'sections' | 'homes' | 'users'>('upload');
 
   // Video Upload State
   const [selectedSectionId, setSelectedSectionId] = useState<number>(sections[0]?.id || 1);
   const [videoTitle, setVideoTitle] = useState('');
   const [videoDesc, setVideoDesc] = useState('');
-  const [videoSourceMode, setVideoSourceMode] = useState<'file' | 'url'>('file');
-  const [videoUrl, setVideoUrl] = useState('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4');
-  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
-  const [uploadedFileSize, setUploadedFileSize] = useState<string | null>(null);
+  const [videoUrl, setVideoUrl] = useState('');
   const [duration, setDuration] = useState(180);
 
   // 3 Quiz Questions State
@@ -37,7 +36,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
 
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
-  const [isProcessingFile, setIsProcessingFile] = useState(false);
 
   // Home Creation State
   const [newHomeName, setNewHomeName] = useState('');
@@ -46,6 +44,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   // Section Creation State
   const [newSecTitle, setNewSecTitle] = useState('');
   const [newSecDesc, setNewSecDesc] = useState('');
+
+  // Course/video management state (archive + delete)
+  const [courseMsg, setCourseMsg] = useState<string | null>(null);
+  const [courseErr, setCourseErr] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [sectionToDelete, setSectionToDelete] = useState<Section | null>(null);
+  const [videoToDelete, setVideoToDelete] = useState<{ video: VideoType; sectionTitle: string } | null>(null);
+  const [isDeletingCourseItem, setIsDeletingCourseItem] = useState(false);
 
   // User Management State
   const [allUsers, setAllUsers] = useState<User[]>([]);
@@ -59,13 +65,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
   const [isDeletingUser, setIsDeletingUser] = useState(false);
 
-  // Reports State
-  const [reports, setReports] = useState<StaffReport[]>([]);
-
   useEffect(() => {
     if (currentUser.role === 'admin') {
       fetchUsers();
-      fetchReports();
     }
   }, [currentUser]);
 
@@ -97,45 +99,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     }
   };
 
-  const fetchReports = async () => {
-    try {
-      const res = await fetch('/api/admin/reports', {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setReports(data);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Handle local PC video file upload
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsProcessingFile(true);
-    setUploadErr(null);
-
-    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
-    setUploadedFileName(file.name);
-    setUploadedFileSize(`${fileSizeMB} MB`);
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (event.target?.result) {
-        setVideoUrl(event.target.result as string);
-        setIsProcessingFile(false);
-      }
-    };
-    reader.onerror = () => {
-      setUploadErr('Failed to read selected video file.');
-      setIsProcessingFile(false);
-    };
-    reader.readAsDataURL(file);
-  };
+  const youtubeVideoId = extractYouTubeVideoId(videoUrl);
 
   const handleUploadVideo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -143,7 +107,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
     setUploadMsg(null);
 
     if (!videoUrl) {
-      setUploadErr('Please upload a video file or enter a video URL.');
+      setUploadErr('Please enter a YouTube video URL.');
+      return;
+    }
+    if (!youtubeVideoId) {
+      setUploadErr('That does not look like a valid YouTube URL (e.g. https://www.youtube.com/watch?v=...).');
       return;
     }
 
@@ -164,7 +132,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           sectionId: selectedSectionId,
           title: videoTitle,
           description: videoDesc,
-          url: videoUrl,
+          url: `https://www.youtube.com/watch?v=${youtubeVideoId}`,
           durationSeconds: duration,
           questions,
         }),
@@ -176,8 +144,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       setUploadMsg('Training video module and 3 quiz questions created successfully!');
       setVideoTitle('');
       setVideoDesc('');
-      setUploadedFileName(null);
-      setUploadedFileSize(null);
+      setVideoUrl('');
       onRefreshData();
     } catch (err: any) {
       setUploadErr(err.message || 'Error creating video module');
@@ -225,6 +192,90 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const toggleSectionArchive = async (section: Section) => {
+    setCourseErr(null);
+    setCourseMsg(null);
+    setBusyKey(`section-${section.id}`);
+    try {
+      const res = await fetch(`/api/sections/${section.id}/archive`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: !section.isArchived }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update course');
+      setCourseMsg(`"${section.title}" was ${section.isArchived ? 'restored' : 'archived'}.`);
+      onRefreshData();
+    } catch (err: any) {
+      setCourseErr(err.message || 'Failed to update course');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const toggleVideoArchive = async (video: VideoType) => {
+    setCourseErr(null);
+    setCourseMsg(null);
+    setBusyKey(`video-${video.id}`);
+    try {
+      const res = await fetch(`/api/videos/${video.id}/archive`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: !video.isArchived }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update video');
+      setCourseMsg(`"${video.title}" was ${video.isArchived ? 'restored' : 'archived'}.`);
+      onRefreshData();
+    } catch (err: any) {
+      setCourseErr(err.message || 'Failed to update video');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const executeDeleteSection = async () => {
+    if (!sectionToDelete) return;
+    setIsDeletingCourseItem(true);
+    setCourseErr(null);
+    setCourseMsg(null);
+    try {
+      const res = await fetch(`/api/sections/${sectionToDelete.id}`, { method: 'DELETE', credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete course');
+      setCourseMsg(data.message);
+      setSectionToDelete(null);
+      onRefreshData();
+    } catch (err: any) {
+      setCourseErr(err.message || 'Failed to delete course');
+      setSectionToDelete(null);
+    } finally {
+      setIsDeletingCourseItem(false);
+    }
+  };
+
+  const executeDeleteVideo = async () => {
+    if (!videoToDelete) return;
+    setIsDeletingCourseItem(true);
+    setCourseErr(null);
+    setCourseMsg(null);
+    try {
+      const res = await fetch(`/api/videos/${videoToDelete.video.id}`, { method: 'DELETE', credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete video');
+      setCourseMsg(data.message);
+      setVideoToDelete(null);
+      onRefreshData();
+    } catch (err: any) {
+      setCourseErr(err.message || 'Failed to delete video');
+      setVideoToDelete(null);
+    } finally {
+      setIsDeletingCourseItem(false);
     }
   };
 
@@ -322,10 +373,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
         <div>
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
             <ShieldCheck className="w-6 h-6 text-indigo-600" />
-            Admin Management Portal
+            Course & Staff Management
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            Upload videos from PC or URL, manage staff & admin users, organize sections, and view reports.
+            Add YouTube training videos, manage courses and staff/admin accounts, and organize workplace homes.
           </p>
         </div>
       </div>
@@ -346,7 +397,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
             activeSubTab === 'sections' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <Plus className="w-3.5 h-3.5 shrink-0" /> Titles/Sections
+          <Plus className="w-3.5 h-3.5 shrink-0" /> Courses & Videos
         </button>
         <button
           onClick={() => setActiveSubTab('homes')}
@@ -363,14 +414,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           }`}
         >
           <Users className="w-3.5 h-3.5 shrink-0" /> Staff & Admins
-        </button>
-        <button
-          onClick={() => setActiveSubTab('reports')}
-          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 sm:flex-1 ${
-            activeSubTab === 'reports' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <BarChart3 className="w-3.5 h-3.5 shrink-0" /> Completion Reports
         </button>
       </div>
 
@@ -400,7 +443,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                 onChange={(e) => setSelectedSectionId(parseInt(e.target.value, 10))}
                 className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold"
               >
-                {sections.map((s) => (
+                {sections.filter((s) => !s.isArchived).map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.title}
                   </option>
@@ -421,82 +464,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
             </div>
           </div>
 
-          {/* Video Source Selector (PC File Upload vs Web URL) */}
+          {/* YouTube Video Source */}
           <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
-                <FileVideo className="w-4 h-4 text-indigo-600" /> Video File Source
-              </label>
+            <label className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+              <Youtube className="w-4 h-4 text-indigo-600" /> YouTube Video URL
+            </label>
 
-              <div className="flex bg-white p-1 rounded-xl border border-slate-200 text-xs font-bold">
-                <button
-                  type="button"
-                  onClick={() => setVideoSourceMode('file')}
-                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all ${
-                    videoSourceMode === 'file' ? 'bg-indigo-600 text-white shadow' : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <Upload className="w-3.5 h-3.5" /> Upload from PC
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setVideoSourceMode('url')}
-                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all ${
-                    videoSourceMode === 'url' ? 'bg-indigo-600 text-white shadow' : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <LinkIcon className="w-3.5 h-3.5" /> Video URL
-                </button>
-              </div>
-            </div>
-
-            {videoSourceMode === 'file' ? (
-              <div className="space-y-3">
-                <div className="border-2 border-dashed border-indigo-200 bg-indigo-50/40 hover:bg-indigo-50 rounded-2xl p-6 text-center cursor-pointer transition-all relative">
-                  <input
-                    type="file"
-                    accept="video/mp4,video/webm,video/ogg,video/*"
-                    onChange={handleFileChange}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                  />
-                  <div className="flex flex-col items-center justify-center space-y-2">
-                    <div className="p-3 bg-indigo-600 text-white rounded-2xl shadow-md shadow-indigo-200">
-                      <Upload className="w-6 h-6" />
-                    </div>
-                    <p className="font-bold text-slate-800 text-sm">
-                      Click or drag MP4 video file from your PC
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      Supports MP4, WebM, OGG files directly from your computer
-                    </p>
-                    {uploadedFileName && (
-                      <span className="mt-2 px-3 py-1 bg-emerald-100 text-emerald-800 rounded-full text-xs font-bold font-mono">
-                        Loaded: {uploadedFileName} ({uploadedFileSize})
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Direct Video MP4 URL</label>
-                <input
-                  type="url"
-                  required={videoSourceMode === 'url'}
-                  value={videoUrl}
-                  onChange={(e) => setVideoUrl(e.target.value)}
-                  placeholder="https://commondatastorage.googleapis.com/.../sample.mp4"
-                  className="w-full px-4 py-2.5 rounded-2xl bg-white border border-slate-200 text-xs font-mono"
-                />
-              </div>
+            <input
+              type="url"
+              required
+              value={videoUrl}
+              onChange={(e) => setVideoUrl(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=... or https://youtu.be/..."
+              className="w-full px-4 py-2.5 rounded-2xl bg-white border border-slate-200 text-xs font-mono"
+            />
+            {videoUrl && !youtubeVideoId && (
+              <p className="text-xs text-rose-600 font-medium">
+                That doesn't look like a valid YouTube link yet.
+              </p>
             )}
+            <p className="text-xs text-slate-500">
+              Paste a link to a public or unlisted YouTube video. Staff will watch it directly on this page,
+              and their watch progress is tracked automatically.
+            </p>
 
-            {/* Video Live Preview */}
-            {videoUrl && (
+            {/* Preview */}
+            {youtubeVideoId && (
               <div className="space-y-2 pt-2 border-t border-slate-200">
-                <span className="text-xs font-bold text-slate-600">Video Player Test Preview</span>
+                <span className="text-xs font-bold text-slate-600">Preview</span>
                 <div className="rounded-2xl overflow-hidden bg-slate-950 aspect-video max-h-56 flex items-center justify-center border border-slate-800">
-                  <video src={videoUrl} controls className="w-full h-full object-contain" />
+                  <img
+                    src={`https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg`}
+                    alt="YouTube video thumbnail"
+                    className="w-full h-full object-contain"
+                  />
                 </div>
               </div>
             )}
@@ -544,15 +545,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
 
           <button
             type="submit"
-            disabled={isProcessingFile}
             className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold text-sm shadow-xl shadow-indigo-200 transition-all flex items-center justify-center gap-2"
           >
-            {isProcessingFile ? 'Loading Video File...' : 'Publish Training Video Module'}
+            Publish Training Video Module
           </button>
         </form>
       )}
 
-      {/* 2. SECTIONS MANAGEMENT */}
+      {/* 2. COURSES & VIDEOS MANAGEMENT */}
       {activeSubTab === 'sections' && (
         <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
           <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Add Training Section/Title</h3>
@@ -569,13 +569,93 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
             </button>
           </form>
 
+          {courseMsg && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-700 text-xs font-medium flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" /> {courseMsg}
+            </div>
+          )}
+          {courseErr && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-rose-700 text-xs font-medium flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" /> {courseErr}
+            </div>
+          )}
+
           <div className="space-y-3 pt-4">
             {sections.map((s) => (
-              <div key={s.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-200 flex items-center justify-between">
-                <div>
-                  <h4 className="font-bold text-slate-800 text-sm">{s.title}</h4>
-                  <p className="text-xs text-slate-500">{s.videos.length} videos inside</p>
+              <div
+                key={s.id}
+                className={`p-4 rounded-2xl border ${
+                  s.isArchived ? 'bg-slate-100 border-slate-200 opacity-75' : 'bg-slate-50 border-slate-200'
+                }`}
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h4 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                      {s.title}
+                      {s.isArchived && (
+                        <span className="text-[10px] font-bold uppercase bg-slate-300 text-slate-700 px-2 py-0.5 rounded-full">
+                          Archived
+                        </span>
+                      )}
+                    </h4>
+                    <p className="text-xs text-slate-500">{s.videos.length} video{s.videos.length === 1 ? '' : 's'}</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => toggleSectionArchive(s)}
+                      disabled={busyKey === `section-${s.id}`}
+                      className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50 transition-all flex items-center gap-1.5"
+                    >
+                      {s.isArchived ? <ArchiveRestore className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
+                      {s.isArchived ? 'Restore' : 'Archive'}
+                    </button>
+                    <button
+                      onClick={() => setSectionToDelete(s)}
+                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors"
+                      title="Delete course"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
+
+                {s.videos.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-slate-200/70 space-y-2">
+                    {s.videos.map((v) => (
+                      <div
+                        key={v.id}
+                        className={`flex items-center justify-between p-2.5 rounded-xl border ${
+                          v.isArchived ? 'bg-slate-50 border-slate-100 opacity-70' : 'bg-white border-slate-100'
+                        }`}
+                      >
+                        <p className="text-xs font-semibold text-slate-700 truncate flex items-center gap-1.5">
+                          {v.title}
+                          {v.isArchived && (
+                            <span className="text-[9px] font-bold uppercase bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full shrink-0">
+                              Archived
+                            </span>
+                          )}
+                        </p>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => toggleVideoArchive(v)}
+                            disabled={busyKey === `video-${v.id}`}
+                            className="px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50 transition-all"
+                          >
+                            {v.isArchived ? 'Restore' : 'Archive'}
+                          </button>
+                          <button
+                            onClick={() => setVideoToDelete({ video: v, sectionTitle: s.title })}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                            title="Delete video"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -585,7 +665,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       {/* 3. HOMES LOCATION MANAGEMENT */}
       {activeSubTab === 'homes' && (
         <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
-          <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Workplace Homes (Currently Hasset & Hope)</h3>
+          <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Workplace Homes</h3>
           <form onSubmit={handleCreateHome} className="flex flex-col sm:flex-row gap-2">
             <input
               type="text"
@@ -800,70 +880,47 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
         </div>
       )}
 
-      {/* 5. COMPLETION REPORTS */}
-      {activeSubTab === 'reports' && (
-        <div className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6">
-          <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">Staff Training Completion Report</h3>
-          <div className="space-y-4">
-            {reports.map((r) => (
-              <div key={r.userId} className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h4 className="font-bold text-slate-800 text-sm">{r.username} ({r.email})</h4>
-                    <span className="text-xs text-slate-500">Location: {r.homeName}</span>
-                  </div>
-                  <span className="font-mono font-bold text-indigo-600 text-base">{r.overallPercentage}% FINISHED</span>
-                </div>
-                <div className="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden">
-                  <div className="h-full bg-indigo-600 rounded-full" style={{ width: `${r.overallPercentage}%` }}></div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* DELETE USER CONFIRMATION MODAL */}
       {userToDelete && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-[28px] max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-100 animate-in fade-in zoom-in-95">
-            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center font-bold">
-              <Trash2 className="w-6 h-6" />
-            </div>
-            <div>
-              <h3 className="text-lg font-bold text-slate-900">Confirm User Deletion</h3>
-              <p className="text-xs text-slate-600 mt-1">
-                Are you sure you want to permanently delete the <strong className="text-rose-600 uppercase">{userToDelete.role}</strong> account for <strong className="text-slate-900">{userToDelete.username}</strong> ({userToDelete.email})?
-              </p>
-            </div>
+        <ConfirmDialog
+          title="Confirm User Deletion"
+          description={`Are you sure you want to permanently delete the ${userToDelete.role.toUpperCase()} account for ${userToDelete.username} (${userToDelete.email})?`}
+          warning="All training progress data associated with this user will be deleted permanently."
+          confirmLabel="Yes, Delete Account"
+          loadingLabel="Deleting Account..."
+          isLoading={isDeletingUser}
+          onConfirm={executeDeleteUser}
+          onCancel={() => setUserToDelete(null)}
+        />
+      )}
 
-            <div className="p-3 bg-rose-50 border border-rose-100 rounded-2xl text-[11px] text-rose-700 font-medium flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              All training progress data associated with this user will be deleted permanently.
-            </div>
+      {/* DELETE COURSE CONFIRMATION MODAL */}
+      {sectionToDelete && (
+        <ConfirmDialog
+          title="Delete course?"
+          description={`Delete "${sectionToDelete.title}" and all of its videos?`}
+          warning="If any staff member has activity on this course (assignments, watch history, or quiz attempts), it will be archived instead of deleted so their records are preserved."
+          confirmLabel="Delete Course"
+          loadingLabel="Deleting..."
+          isLoading={isDeletingCourseItem}
+          onConfirm={executeDeleteSection}
+          onCancel={() => setSectionToDelete(null)}
+        />
+      )}
 
-            <div className="flex items-center justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                disabled={isDeletingUser}
-                onClick={() => setUserToDelete(null)}
-                className="px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isDeletingUser}
-                onClick={executeDeleteUser}
-                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-lg shadow-rose-200 transition-all flex items-center gap-1.5"
-              >
-                {isDeletingUser ? 'Deleting Account...' : 'Yes, Delete Account'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* DELETE VIDEO CONFIRMATION MODAL */}
+      {videoToDelete && (
+        <ConfirmDialog
+          title="Delete video?"
+          description={`Delete "${videoToDelete.video.title}" from "${videoToDelete.sectionTitle}"?`}
+          warning="If any staff member has watch or quiz history on this video, it will be archived instead of deleted so their records are preserved."
+          confirmLabel="Delete Video"
+          loadingLabel="Deleting..."
+          isLoading={isDeletingCourseItem}
+          onConfirm={executeDeleteVideo}
+          onCancel={() => setVideoToDelete(null)}
+        />
       )}
     </div>
   );
 };
-

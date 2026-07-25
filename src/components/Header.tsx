@@ -20,13 +20,13 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="flex items-start justify-between w-full sm:w-auto">
         <div>
           <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
-            Training Dashboard
+            {user?.role === 'admin' ? 'Administrator Dashboard' : 'Training Dashboard'}
           </h1>
           <p className="text-slate-500 text-xs sm:text-sm mt-1">
             Welcome back, <span className="font-semibold text-slate-800">{user?.username || 'Staff Member'}</span>.
             {user?.role === 'staff'
-              ? ' Complete mandatory video modules & pass 2/3 quiz score to proceed.'
-              : ' Managing courses, homes, and staff progress reports.'}
+              ? ' Complete your assigned training modules & pass the required quiz score to proceed.'
+              : ' Training Administration — manage staff, courses, assignments, and completion reports.'}
           </p>
         </div>
 

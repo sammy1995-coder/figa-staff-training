@@ -19,7 +19,10 @@ export const CourseCatalog: React.FC<CourseCatalogProps> = ({ sections, onSelect
 
       {sections.length === 0 ? (
         <div className="p-8 text-center bg-white rounded-[32px] border border-slate-200">
-          <p className="text-sm text-slate-500">No training titles available yet.</p>
+          <p className="text-sm font-semibold text-slate-700">No courses assigned yet</p>
+          <p className="text-xs text-slate-500 mt-1">
+            Your administrator hasn't assigned any training courses to your account yet.
+          </p>
         </div>
       ) : (
         sections.map((section, secIdx) => (
