@@ -1,22 +1,13 @@
 import React from 'react';
-import { Section, Video, Home, User } from '../types';
-import { Play, CheckCircle2, Lock, ShieldCheck, MapPin, Clock, ArrowRight, Award, AlertTriangle } from 'lucide-react';
+import { Section, Video } from '../types';
+import { Play, CheckCircle2, Lock, BookOpen } from 'lucide-react';
 
 interface BentoDashboardProps {
-  user: User | null;
-  currentHome: Home | null;
   sections: Section[];
   onSelectVideo: (video: Video) => void;
-  onOpenHomeSelector: () => void;
 }
 
-export const BentoDashboard: React.FC<BentoDashboardProps> = ({
-  user,
-  currentHome,
-  sections,
-  onSelectVideo,
-  onOpenHomeSelector,
-}) => {
+export const BentoDashboard: React.FC<BentoDashboardProps> = ({ sections, onSelectVideo }) => {
   // Collect all videos
   const allVideos = sections.flatMap((s) => s.videos);
   const completedVideos = allVideos.filter((v) => v.passed);
@@ -26,6 +17,21 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
   const totalVideos = allVideos.length;
   const progressPercentage =
     totalVideos > 0 ? Math.round((completedVideos.length / totalVideos) * 100) : 0;
+
+  if (sections.length === 0) {
+    return (
+      <div className="bg-white rounded-[32px] p-10 border border-slate-200 shadow-sm text-center space-y-3">
+        <div className="w-16 h-16 bg-indigo-50 text-indigo-500 rounded-full flex items-center justify-center mx-auto">
+          <BookOpen className="w-8 h-8" />
+        </div>
+        <h3 className="text-lg font-bold text-slate-900">No training assigned yet</h3>
+        <p className="text-xs text-slate-500 max-w-sm mx-auto">
+          Your administrator hasn't assigned any training courses to your account yet. Check back soon, or reach
+          out to an administrator if you believe this is a mistake.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 sm:gap-6 select-none">
@@ -152,14 +158,14 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
       </div>
 
       {/* 4. What's Due Deadlines List */}
-      <div className="md:col-span-2 bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
+      <div className="md:col-span-4 bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
         <div className="flex items-center justify-between mb-4">
-          <h4 className="font-bold text-slate-800 text-sm">Assigned Deadlines & Progress</h4>
+          <h4 className="font-bold text-slate-800 text-sm">Assigned Training & Progress</h4>
           <span className="text-xs text-indigo-600 font-bold">Mandatory</span>
         </div>
 
         <div className="space-y-3">
-          {allVideos.slice(0, 2).map((vid) => (
+          {allVideos.slice(0, 4).map((vid) => (
             <div
               key={vid.id}
               onClick={() => onSelectVideo(vid)}
@@ -181,36 +187,6 @@ export const BentoDashboard: React.FC<BentoDashboardProps> = ({
               </span>
             </div>
           ))}
-        </div>
-      </div>
-
-      {/* 5. Access Authorization & Home Control */}
-      <div className="md:col-span-2 bg-slate-100 rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 sm:gap-6">
-        <div className="flex-1">
-          <div className="flex items-center gap-2 mb-1">
-            <ShieldCheck className="w-4 h-4 text-emerald-600" />
-            <h4 className="font-bold text-slate-800 text-sm">Access Authorization</h4>
-          </div>
-          <p className="text-xs text-slate-600 mb-4">
-            Your location is verified at <strong className="text-slate-900">{currentHome?.name || 'Assigned Home'}</strong>. Staff cannot access unauthorized location courses.
-          </p>
-          <div className="flex gap-2">
-            <button
-              onClick={onOpenHomeSelector}
-              className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-800 rounded-xl text-xs font-bold border border-slate-200 shadow-sm transition-all"
-            >
-              Verify Location
-            </button>
-          </div>
-        </div>
-
-        <div className="w-24 h-24 bg-white rounded-2xl flex items-center justify-center border border-slate-200 shadow-sm shrink-0">
-          <div className="text-center">
-            <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Access OTP</p>
-            <p className="text-xl font-mono font-black text-indigo-600 mt-1">
-              {user?.otpCode || '4821'}
-            </p>
-          </div>
         </div>
       </div>
     </div>

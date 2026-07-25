@@ -1,6 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Video, QuizQuestion, User } from '../types';
-import { Play, CheckCircle2, Lock, X, Maximize2, Minimize2, AlertCircle, HelpCircle, Trophy } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { Video, VideoDetail, QuizQuestion, User } from '../types';
+import { Play, CheckCircle2, Lock, X, Maximize2, Minimize2, AlertCircle, HelpCircle, Trophy, History } from 'lucide-react';
+import { extractYouTubeVideoId, loadYouTubeIframeApi, type YTPlayer } from '../lib/youtube';
+import { WatchSessionTracker } from '../lib/videoTracking';
 
 interface VideoPlayerModalProps {
   video: Video;
@@ -8,6 +10,13 @@ interface VideoPlayerModalProps {
   onClose: () => void;
   onProgressUpdate: (videoId: number, percentage: number) => void;
   onQuizComplete: (videoId: number, score: number, passed: boolean) => void;
+}
+
+function formatTime(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
 export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
@@ -19,14 +28,39 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // The list item passed in only has summary fields — quiz questions, the
+  // last saved position, and the completion threshold all come from the
+  // authoritative GET /api/videos/:id detail fetch below.
+  const [detail, setDetail] = useState<VideoDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [resumeBanner, setResumeBanner] = useState<number | null>(null);
+
   const [percentage, setPercentage] = useState(video.percentage || 0);
-  const [watchedFinished, setWatchedFinished] = useState(
-    video.watchedFinished || (video.percentage || 0) >= 95
-  );
+  const [watchedFinished, setWatchedFinished] = useState(video.watchedFinished || false);
+  const quizStartedAtRef = useRef<string | null>(null);
+
+  const percentageRef = useRef(percentage);
+  useEffect(() => {
+    percentageRef.current = percentage;
+  }, [percentage]);
+  const watchedFinishedRef = useRef(watchedFinished);
+  useEffect(() => {
+    watchedFinishedRef.current = watchedFinished;
+  }, [watchedFinished]);
+
+  const thresholdRef = useRef(0.95);
+  const lastPolledPositionRef = useRef(0);
+  const trackerRef = useRef<WatchSessionTracker | null>(null);
+
+  const youtubeId = useMemo(() => extractYouTubeVideoId(video.url), [video.url]);
+  const youtubeContainerRef = useRef<HTMLDivElement | null>(null);
+  const youtubePlayerRef = useRef<YTPlayer | null>(null);
+  const youtubeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Quiz state
   const [showQuiz, setShowQuiz] = useState(false);
-  const [selectedAnswers, setSelectedAnswers] = useState<number[]>([-1, -1, -1]);
+  const [selectedAnswers, setSelectedAnswers] = useState<number[]>([]);
   const [quizResult, setQuizResult] = useState<{
     score: number;
     passed: boolean;
@@ -36,19 +70,57 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [submittingQuiz, setSubmittingQuiz] = useState(false);
   const [quizError, setQuizError] = useState<string | null>(null);
 
-  const questions: QuizQuestion[] = video.quizQuestions || [];
+  const questions: QuizQuestion[] = detail?.quizQuestions || [];
 
-  // Track video progress
+  // Load the authoritative video detail (quiz questions, resume position,
+  // completion threshold) once when the modal opens, and open the tracking
+  // session for "video page opened" the moment we know where to resume from.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/videos/${video.id}`, { credentials: 'include' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load this training video.');
+        if (cancelled) return;
+
+        setDetail(data);
+        setPercentage(data.progress?.percentage || 0);
+        setWatchedFinished(data.progress?.watchedFinished || false);
+        thresholdRef.current = data.completionThreshold || 0.95;
+        setSelectedAnswers(new Array(data.quizQuestions?.length || 0).fill(-1));
+        if (data.lastPositionSeconds > 5 && !data.progress?.watchedFinished) {
+          setResumeBanner(data.lastPositionSeconds);
+        }
+
+        trackerRef.current = new WatchSessionTracker({
+          videoId: video.id,
+          getPosition: () => lastPolledPositionRef.current,
+          getDuration: () => youtubePlayerRef.current?.getDuration() || videoRef.current?.duration || data.durationSeconds || 0,
+        });
+        await trackerRef.current.open(data.lastPositionSeconds || 0);
+      } catch (err: any) {
+        if (!cancelled) setDetailError(err.message || 'Failed to load this training video.');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      trackerRef.current?.close('component_unmount');
+      trackerRef.current = null;
+    };
+  }, [video.id]);
+
   const handleTimeUpdate = () => {
     if (videoRef.current && videoRef.current.duration) {
-      const currentPct = Math.round(
-        (videoRef.current.currentTime / videoRef.current.duration) * 100
-      );
+      lastPolledPositionRef.current = videoRef.current.currentTime;
+      const currentPct = Math.round((videoRef.current.currentTime / videoRef.current.duration) * 100);
       if (currentPct > percentage) {
         setPercentage(currentPct);
         onProgressUpdate(video.id, currentPct);
       }
-      if (currentPct >= 95 && !watchedFinished) {
+      if (currentPct / 100 >= thresholdRef.current && !watchedFinished) {
         setWatchedFinished(true);
         onProgressUpdate(video.id, 100);
       }
@@ -59,7 +131,96 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setPercentage(100);
     setWatchedFinished(true);
     onProgressUpdate(video.id, 100);
+    trackerRef.current?.notifyEnded();
   };
+
+  // Native <video> fallback tracking hooks.
+  const handleNativePlay = () => trackerRef.current?.notifyPlaying();
+  const handleNativePause = () => trackerRef.current?.notifyPaused();
+  const handleNativeSeeking = () => trackerRef.current?.notifySeek();
+
+  // YouTube playback + progress/session tracking. Re-runs when the quiz view
+  // mounts over the player (that unmounts the container div) and again when
+  // the learner comes back to the video.
+  useEffect(() => {
+    if (!youtubeId || showQuiz || !youtubeContainerRef.current || !detail) return;
+
+    let cancelled = false;
+    let lastKnownTime = 0;
+
+    loadYouTubeIframeApi().then((YT) => {
+      if (cancelled || !youtubeContainerRef.current) return;
+
+      youtubePlayerRef.current = new YT.Player(youtubeContainerRef.current, {
+        videoId: youtubeId,
+        width: '100%',
+        height: '100%',
+        playerVars: { rel: 0, modestbranding: 1 },
+        events: {
+          onReady: () => {
+            const resumeAt = detail.lastPositionSeconds || 0;
+            if (resumeAt > 5) {
+              youtubePlayerRef.current?.seekTo(resumeAt, true);
+              lastKnownTime = resumeAt;
+              lastPolledPositionRef.current = resumeAt;
+            }
+          },
+          onStateChange: (event) => {
+            if (event.data === YT.PlayerState.PLAYING) {
+              trackerRef.current?.notifyPlaying();
+            } else if (event.data === YT.PlayerState.PAUSED || event.data === YT.PlayerState.BUFFERING) {
+              trackerRef.current?.notifyPaused();
+            } else if (event.data === YT.PlayerState.ENDED) {
+              percentageRef.current = 100;
+              watchedFinishedRef.current = true;
+              setPercentage(100);
+              setWatchedFinished(true);
+              onProgressUpdate(video.id, 100);
+              trackerRef.current?.notifyEnded();
+            }
+          },
+        },
+      });
+
+      youtubeIntervalRef.current = setInterval(() => {
+        const player = youtubePlayerRef.current;
+        if (!player) return;
+        const duration = player.getDuration();
+        if (!duration) return;
+
+        const currentTime = player.getCurrentTime();
+        lastPolledPositionRef.current = currentTime;
+
+        // A jump bigger than a normal 1s poll tick (with slack) means the
+        // learner scrubbed the playhead — that skipped range must never
+        // count as watched time.
+        const state = player.getPlayerState();
+        if (state === YT.PlayerState.PLAYING && Math.abs(currentTime - lastKnownTime - 1) > 2) {
+          trackerRef.current?.notifySeek();
+        }
+        lastKnownTime = currentTime;
+
+        const currentPct = Math.round((currentTime / duration) * 100);
+        if (currentPct > percentageRef.current) {
+          percentageRef.current = currentPct;
+          setPercentage(currentPct);
+          onProgressUpdate(video.id, currentPct);
+        }
+        if (currentPct / 100 >= thresholdRef.current && !watchedFinishedRef.current) {
+          watchedFinishedRef.current = true;
+          setWatchedFinished(true);
+          onProgressUpdate(video.id, 100);
+        }
+      }, 1000);
+    });
+
+    return () => {
+      cancelled = true;
+      if (youtubeIntervalRef.current) clearInterval(youtubeIntervalRef.current);
+      youtubePlayerRef.current?.destroy();
+      youtubePlayerRef.current = null;
+    };
+  }, [youtubeId, showQuiz, video.id, detail]);
 
   const toggleFullscreen = () => {
     setIsFullscreen(!isFullscreen);
@@ -71,9 +232,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setSelectedAnswers(updated);
   };
 
+  const handleOpenQuiz = () => {
+    quizStartedAtRef.current = new Date().toISOString();
+    setShowQuiz(true);
+  };
+
   const handleSubmitQuiz = async () => {
-    if (selectedAnswers.some((a) => a === -1)) {
-      setQuizError('Please answer all 3 questions before submitting!');
+    if (selectedAnswers.length === 0 || selectedAnswers.some((a) => a === -1)) {
+      setQuizError(`Please answer all ${questions.length} question${questions.length === 1 ? '' : 's'} before submitting!`);
       return;
     }
     setQuizError(null);
@@ -89,6 +255,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         body: JSON.stringify({
           videoId: video.id,
           answers: selectedAnswers,
+          startedAt: quizStartedAtRef.current,
         }),
       });
 
@@ -141,19 +308,39 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-4 sm:space-y-6">
+          {detailError && (
+            <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl text-rose-700 text-xs font-medium flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" /> {detailError}
+            </div>
+          )}
+
           {!showQuiz ? (
             /* VIDEO WATCHER VIEW */
             <>
-              {/* HTML5 Video Player */}
+              {resumeBanner !== null && (
+                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-2xl text-indigo-700 text-xs font-semibold flex items-center gap-2">
+                  <History className="w-4 h-4 shrink-0" />
+                  Resumed from {formatTime(resumeBanner)}
+                </div>
+              )}
+
+              {/* Video Player: YouTube embed when the stored URL is a YouTube link, native HTML5 player otherwise */}
               <div className="relative bg-slate-950 rounded-2xl overflow-hidden aspect-video shadow-xl border border-slate-800 flex items-center justify-center group">
-                <video
-                  ref={videoRef}
-                  src={video.url}
-                  controls
-                  onTimeUpdate={handleTimeUpdate}
-                  onEnded={handleEnded}
-                  className="w-full h-full object-cover"
-                />
+                {youtubeId ? (
+                  <div ref={youtubeContainerRef} className="w-full h-full" />
+                ) : (
+                  <video
+                    ref={videoRef}
+                    src={video.url}
+                    controls
+                    onTimeUpdate={handleTimeUpdate}
+                    onEnded={handleEnded}
+                    onPlay={handleNativePlay}
+                    onPause={handleNativePause}
+                    onSeeking={handleNativeSeeking}
+                    className="w-full h-full object-cover"
+                  />
+                )}
               </div>
 
               {/* Progress Tracking Bar */}
@@ -171,7 +358,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <p className="text-xs text-slate-500">
                   {watchedFinished
                     ? 'Video fully watched! You are ready to complete the quiz below.'
-                    : 'Watch the entire video to unlock the mandatory 3-question quiz.'}
+                    : 'Watch the entire video to unlock the mandatory quiz.'}
+                </p>
+                <p className="text-[10px] text-slate-400">
+                  Training activity is recorded for completion and compliance reporting.
                 </p>
               </div>
 
@@ -186,13 +376,20 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
                 <div className="shrink-0">
                   {watchedFinished ? (
-                    <button
-                      onClick={() => setShowQuiz(true)}
-                      className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold text-sm shadow-xl shadow-indigo-200 transition-all flex items-center gap-2 animate-bounce"
-                    >
-                      <HelpCircle className="w-5 h-5" />
-                      Take Quiz (3 Questions)
-                    </button>
+                    questions.length > 0 ? (
+                      <button
+                        onClick={handleOpenQuiz}
+                        className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold text-sm shadow-xl shadow-indigo-200 transition-all flex items-center gap-2 animate-bounce"
+                      >
+                        <HelpCircle className="w-5 h-5" />
+                        Take Quiz ({questions.length} Question{questions.length === 1 ? '' : 's'})
+                      </button>
+                    ) : (
+                      <div className="px-5 py-3 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-2xl text-xs font-bold flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4" />
+                        No quiz for this video
+                      </div>
+                    )
                   ) : (
                     <div className="px-5 py-3 bg-slate-100 border border-slate-200 text-slate-400 rounded-2xl text-xs font-bold flex items-center gap-2">
                       <Lock className="w-4 h-4" />
@@ -209,7 +406,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <div>
                   <h3 className="text-xl font-bold text-slate-900">Module Knowledge Check</h3>
                   <p className="text-xs text-slate-500 mt-1">
-                    Answer all 3 questions. At least <strong className="text-indigo-600">2 out of 3 (66%)</strong> score is required to pass and move to the next video.
+                    Answer all {questions.length} question{questions.length === 1 ? '' : 's'}. At least{' '}
+                    <strong className="text-indigo-600">2 out of 3 (66%)</strong> score is required to pass and move
+                    to the next video.
                   </p>
                 </div>
                 <button
@@ -282,7 +481,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       {quizResult.passed ? 'Quiz Passed!' : 'Did Not Pass'}
                     </h3>
                     <p className="text-sm font-semibold text-slate-600 mt-2">
-                      Your Score: <span className="text-indigo-600 font-mono text-lg font-bold">{quizResult.score} / {quizResult.total}</span>
+                      Your Score: <span className="text-indigo-600 font-mono text-lg font-bold">{quizResult.score} / {questions.length}</span>
                     </p>
                     <p className="text-xs text-slate-500 mt-2 max-w-md mx-auto">
                       {quizResult.message}
@@ -294,7 +493,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       <button
                         onClick={() => {
                           setQuizResult(null);
-                          setSelectedAnswers([-1, -1, -1]);
+                          setSelectedAnswers(new Array(questions.length).fill(-1));
+                          quizStartedAtRef.current = new Date().toISOString();
                         }}
                         className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold text-xs shadow-lg shadow-indigo-200"
                       >

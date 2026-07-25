@@ -1,11 +1,15 @@
 import React from 'react';
 import { User } from '../types';
-import { LayoutGrid, BookOpen, LogOut, ShieldCheck, X } from 'lucide-react';
+import { LayoutGrid, BookOpen, LogOut, X, ClipboardList, Settings, BarChart3 } from 'lucide-react';
+
+export type AdminTab = 'dashboard' | 'assign' | 'manage' | 'reports';
+export type StaffTab = 'dashboard' | 'courses';
+export type ActiveTab = AdminTab | StaffTab;
 
 interface SidebarProps {
   user: User | null;
-  activeTab: 'dashboard' | 'courses' | 'homes' | 'reports' | 'admin';
-  setActiveTab: (tab: 'dashboard' | 'courses' | 'homes' | 'reports' | 'admin') => void;
+  activeTab: ActiveTab;
+  setActiveTab: (tab: ActiveTab) => void;
   onLogout: () => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
@@ -19,6 +23,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpenMobile = false,
   onCloseMobile,
 }) => {
+  const isAdmin = user?.role === 'admin';
+
+  const navItem = (tab: ActiveTab, label: string, Icon: React.ElementType) => (
+    <button
+      key={tab}
+      onClick={() => {
+        setActiveTab(tab);
+        if (onCloseMobile) onCloseMobile();
+      }}
+      className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-sm font-medium ${
+        activeTab === tab
+          ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30 font-semibold'
+          : 'text-slate-400 hover:bg-slate-800/60 border-transparent hover:text-slate-200'
+      }`}
+    >
+      <Icon className="w-5 h-5" />
+      {label}
+    </button>
+  );
+
   const navContent = (
     <>
       {/* Brand Header */}
@@ -30,7 +54,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div>
             <span className="text-xl font-bold tracking-tight text-white block">VideoTrain</span>
             <span className="text-[10px] uppercase font-semibold tracking-wider text-indigo-400">
-              Staff Portal
+              {isAdmin ? 'Admin Portal' : 'Staff Portal'}
             </span>
           </div>
         </div>
@@ -48,51 +72,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Navigation */}
       <nav className="flex-1 space-y-2">
-        <button
-          onClick={() => {
-            setActiveTab('dashboard');
-            if (onCloseMobile) onCloseMobile();
-          }}
-          className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-sm font-medium ${
-            activeTab === 'dashboard'
-              ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30 font-semibold'
-              : 'text-slate-400 hover:bg-slate-800/60 border-transparent hover:text-slate-200'
-          }`}
-        >
-          <LayoutGrid className="w-5 h-5" />
-          Dashboard
-        </button>
-
-        <button
-          onClick={() => {
-            setActiveTab('courses');
-            if (onCloseMobile) onCloseMobile();
-          }}
-          className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-sm font-medium ${
-            activeTab === 'courses'
-              ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30 font-semibold'
-              : 'text-slate-400 hover:bg-slate-800/60 border-transparent hover:text-slate-200'
-          }`}
-        >
-          <BookOpen className="w-5 h-5" />
-          Training Modules
-        </button>
-
-        {user?.role === 'admin' && (
-          <button
-            onClick={() => {
-              setActiveTab('admin');
-              if (onCloseMobile) onCloseMobile();
-            }}
-            className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-sm font-medium ${
-              activeTab === 'admin'
-                ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30 font-semibold'
-                : 'text-slate-400 hover:bg-slate-800/60 border-transparent hover:text-slate-200'
-            }`}
-          >
-            <ShieldCheck className="w-5 h-5 text-indigo-400" />
-            Admin Control
-          </button>
+        {isAdmin ? (
+          <>
+            {navItem('dashboard', 'Dashboard', LayoutGrid)}
+            {navItem('assign', 'Assign Training', ClipboardList)}
+            {navItem('manage', 'Manage Courses', Settings)}
+            {navItem('reports', 'Reports', BarChart3)}
+          </>
+        ) : (
+          <>
+            {navItem('dashboard', 'Dashboard', LayoutGrid)}
+            {navItem('courses', 'Training Modules', BookOpen)}
+          </>
         )}
       </nav>
 
@@ -107,7 +98,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="overflow-hidden">
                 <p className="text-sm font-semibold truncate text-white">{user.username}</p>
                 <p className="text-xs text-slate-400 truncate">
-                  {user.role === 'admin' ? 'Admin Owner' : 'Staff'} • {user.homeName || 'Location Verified'}
+                  {isAdmin ? 'Administrator' : 'Staff'} • {user.homeName || 'Location Verified'}
                 </p>
               </div>
             </div>
@@ -153,4 +144,3 @@ export const Sidebar: React.FC<SidebarProps> = ({
     </>
   );
 };
-

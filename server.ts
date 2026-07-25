@@ -14,8 +14,11 @@ import {
   videos,
   quizQuestions,
   userProgress,
+  courseAssignments,
+  videoWatchSessions,
+  quizAttempts,
 } from "./src/db/schema.ts";
-import { eq, and, sql, asc } from "drizzle-orm";
+import { eq, and, sql, asc, desc, inArray } from "drizzle-orm";
 import {
   requireAuth,
   requireAdmin,
@@ -34,6 +37,10 @@ import {
   DUMMY_PASSWORD_HASH,
 } from "./src/lib/password.ts";
 import { sendOtpEmail, EmailNotConfiguredError } from "./src/lib/mailer.ts";
+import {
+  VIDEO_COMPLETION_THRESHOLD,
+  HEARTBEAT_DELTA_MAX_SECONDS,
+} from "./src/lib/config.ts";
 
 dotenv.config({ quiet: true });
 
@@ -140,12 +147,111 @@ async function ensureDefaultHomes() {
   }
 }
 
+// Returns true if any video in this section has staff activity worth
+// preserving (progress, watch sessions, quiz attempts) or the section itself
+// has assignments — used to decide archive vs hard-delete.
+async function videosHaveHistory(videoIds: number[]): Promise<boolean> {
+  if (videoIds.length === 0) return false;
+  const [p] = await db.select({ id: userProgress.id }).from(userProgress).where(inArray(userProgress.videoId, videoIds)).limit(1);
+  if (p) return true;
+  const [w] = await db.select({ id: videoWatchSessions.id }).from(videoWatchSessions).where(inArray(videoWatchSessions.videoId, videoIds)).limit(1);
+  if (w) return true;
+  const [q] = await db.select({ id: quizAttempts.id }).from(quizAttempts).where(inArray(quizAttempts.videoId, videoIds)).limit(1);
+  if (q) return true;
+  return false;
+}
+
+async function sectionHasHistory(sectionId: number): Promise<boolean> {
+  const [assignmentRow] = await db
+    .select({ id: courseAssignments.id })
+    .from(courseAssignments)
+    .where(eq(courseAssignments.sectionId, sectionId))
+    .limit(1);
+  if (assignmentRow) return true;
+
+  const sectionVideos = await db.select({ id: videos.id }).from(videos).where(eq(videos.sectionId, sectionId));
+  return videosHaveHistory(sectionVideos.map((v) => v.id));
+}
+
+// Recomputes the legacy per-(user,video) userProgress row from the
+// authoritative videoWatchSessions rows, so existing "percentage"/
+// "watchedFinished" readers (quiz unlock, course cards) stay correct without
+// trusting whatever the client last claimed directly.
+async function syncUserProgressFromSessions(userId: number, videoId: number) {
+  const allSessions = await db
+    .select()
+    .from(videoWatchSessions)
+    .where(and(eq(videoWatchSessions.userId, userId), eq(videoWatchSessions.videoId, videoId)));
+
+  const bestPct = allSessions.reduce((max, s) => Math.max(max, s.completionPercentage), 0);
+  const finished = allSessions.some((s) => s.completed);
+
+  await db
+    .insert(userProgress)
+    .values({ userId, videoId, percentage: bestPct, watchedFinished: finished })
+    .onConflictDoUpdate({
+      target: [userProgress.userId, userProgress.videoId],
+      set: {
+        percentage: sql`GREATEST(${userProgress.percentage}, ${bestPct})`,
+        watchedFinished: sql`${userProgress.watchedFinished} OR ${finished}`,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+// Applies a heartbeat/close update to a watch session: clamps the claimed
+// active-time delta to a plausible bound, clamps position to the video's
+// duration, and (re)computes completion against VIDEO_COMPLETION_THRESHOLD.
+// Never trusts a client-supplied percentage directly.
+async function applyWatchSessionUpdate(
+  session: typeof videoWatchSessions.$inferSelect,
+  opts: {
+    activeSecondsDelta?: unknown;
+    lastPositionSeconds?: unknown;
+    videoDurationSeconds?: unknown;
+    firstPlay?: unknown;
+    extra?: Partial<typeof videoWatchSessions.$inferInsert>;
+  }
+) {
+  const clampedDelta = Math.max(0, Math.min(Number(opts.activeSecondsDelta) || 0, HEARTBEAT_DELTA_MAX_SECONDS));
+  const duration = opts.videoDurationSeconds
+    ? Math.round(Number(opts.videoDurationSeconds))
+    : session.videoDurationSeconds;
+  const newActiveSeconds = session.activeWatchSeconds + clampedDelta;
+  const rawPosition = Math.max(0, Math.round(Number(opts.lastPositionSeconds) || session.lastPositionSeconds));
+  const clampedPosition = duration ? Math.min(rawPosition, duration) : rawPosition;
+  const pct = duration && duration > 0 ? Math.min(100, Math.round((clampedPosition / duration) * 100)) : session.completionPercentage;
+  const justCompleted = !session.completed && !!duration && duration > 0 && clampedPosition / duration >= VIDEO_COMPLETION_THRESHOLD;
+
+  const [updated] = await db
+    .update(videoWatchSessions)
+    .set({
+      activeWatchSeconds: newActiveSeconds,
+      lastPositionSeconds: clampedPosition,
+      videoDurationSeconds: duration,
+      completionPercentage: pct,
+      completed: session.completed || justCompleted,
+      completedAt: session.completedAt || (justCompleted ? new Date() : null),
+      firstPlayedAt: session.firstPlayedAt || (opts.firstPlay ? new Date() : null),
+      lastActivityAt: new Date(),
+      updatedAt: new Date(),
+      ...(opts.extra || {}),
+    })
+    .where(eq(videoWatchSessions.id, session.id))
+    .returning();
+
+  return updated;
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: "100mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "100mb" }));
+  // Requests are JSON bodies only (quiz text, YouTube URLs, etc) now that
+  // raw video files are no longer accepted — no need for the large limit
+  // that base64-encoded video uploads used to require.
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
   // API HEALTH CHECK
   app.get("/api/health", async (req, res) => {
@@ -195,6 +301,33 @@ async function startServer() {
       sendServerError(res, err, "Error creating home");
     }
   });
+
+  const handleDeleteHome = async (req: AuthRequest, res: express.Response) => {
+    try {
+      const homeId = parseInt(req.params.id, 10);
+      if (Number.isNaN(homeId)) {
+        return res.status(400).json({ error: "Invalid home id" });
+      }
+
+      const [assignedUser] = await db
+        .select({ count: sql<number>`COUNT(*)` })
+        .from(users)
+        .where(eq(users.homeId, homeId));
+
+      if (assignedUser?.count > 0) {
+        return res.status(400).json({
+          error: "Cannot delete a home while users are assigned to it. Reassign or remove users first.",
+        });
+      }
+
+      await db.delete(homes).where(eq(homes.id, homeId));
+      res.json({ message: "Home deleted successfully" });
+    } catch (err: any) {
+      sendServerError(res, err, "Error deleting home");
+    }
+  };
+
+  app.delete("/api/homes/:id", requireAuth, requireAdmin, handleDeleteHome);
 
   // ----------------------------------------------------
   // AUTHENTICATION & OTP RECOVERY ENDPOINTS
@@ -482,14 +615,32 @@ async function startServer() {
   app.get("/api/sections", requireAuth, async (req: AuthRequest, res) => {
     try {
       const userId = req.user!.id;
+      const isAdmin = req.user!.role === 'admin';
+      // Only admins may ever see archived content, and only when explicitly
+      // requested (the dedicated course-management view) — never on the
+      // regular staff/admin dashboard listing.
+      const includeArchived = isAdmin && req.query.includeArchived === 'true';
+
+      // Staff only ever see sections they have a course assignment for —
+      // admins manage/see everything (including archived, via a separate
+      // management view) but staff never get the unfiltered list.
+      let myAssignments: (typeof courseAssignments.$inferSelect)[] = [];
+      if (!isAdmin) {
+        myAssignments = await db.select().from(courseAssignments).where(eq(courseAssignments.userId, userId));
+      }
+      const assignmentBySection = new Map(myAssignments.map((a) => [a.sectionId, a]));
 
       const allSections = await db
         .select()
         .from(sections)
+        .where(includeArchived ? sql`true` : eq(sections.isArchived, false))
         .orderBy(asc(sections.orderNum));
+      const visibleSections = isAdmin ? allSections : allSections.filter((s) => assignmentBySection.has(s.id));
+
       const allVideos = await db
         .select()
         .from(videos)
+        .where(includeArchived ? sql`true` : eq(videos.isArchived, false))
         .orderBy(asc(videos.orderNum));
       const allProgress = await db
         .select()
@@ -499,7 +650,7 @@ async function startServer() {
       const progressMap = new Map(allProgress.map((p) => [p.videoId, p]));
 
       // Format response with video progress
-      const result = allSections.map((sec) => {
+      const result = visibleSections.map((sec) => {
         const sectionVideos = allVideos
           .filter((v) => v.sectionId === sec.id)
           .map((vid) => {
@@ -514,9 +665,12 @@ async function startServer() {
             };
           });
 
+        const assignment = assignmentBySection.get(sec.id);
         return {
           ...sec,
           videos: sectionVideos,
+          required: isAdmin ? undefined : assignment?.required ?? true,
+          dueDate: isAdmin ? undefined : assignment?.dueDate ?? null,
         };
       });
 
@@ -569,33 +723,82 @@ async function startServer() {
     }
   });
 
-  app.delete(
-    "/api/sections/:id",
-    requireAuth,
-    requireAdmin,
-    async (req, res) => {
-      try {
-        const sectionId = parseInt(req.params.id, 10);
-        await db.delete(sections).where(eq(sections.id, sectionId));
-        res.json({ message: "Section deleted successfully" });
-      } catch (err: any) {
-        sendServerError(res, err, "Error deleting section");
+  // Deletes only when the section has zero staff activity attached to it
+  // (no assignments, and none of its videos have progress/watch/quiz
+  // history) — otherwise archives it instead so historical reporting for
+  // staff who trained on it stays intact.
+  app.delete('/api/sections/:id', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const sectionId = parseInt(req.params.id, 10);
+      const [existing] = await db.select().from(sections).where(eq(sections.id, sectionId));
+      if (!existing) {
+        return res.status(404).json({ error: 'Section not found' });
       }
-    },
-  );
+
+      const hasHistory = await sectionHasHistory(sectionId);
+      if (hasHistory) {
+        await db.update(sections).set({ isArchived: true, archivedAt: new Date() }).where(eq(sections.id, sectionId));
+        await db.update(videos).set({ isArchived: true, archivedAt: new Date() }).where(eq(videos.sectionId, sectionId));
+        return res.json({
+          message: 'This course has staff training history, so it was archived instead of deleted — completion records are preserved.',
+          archived: true,
+        });
+      }
+
+      const sectionVideos = await db.select({ id: videos.id }).from(videos).where(eq(videos.sectionId, sectionId));
+      const videoIds = sectionVideos.map((v) => v.id);
+      if (videoIds.length > 0) {
+        await db.delete(quizQuestions).where(inArray(quizQuestions.videoId, videoIds));
+        await db.delete(videos).where(eq(videos.sectionId, sectionId));
+      }
+      await db.delete(sections).where(eq(sections.id, sectionId));
+      res.json({ message: 'Section deleted successfully', archived: false });
+    } catch (err: any) {
+      sendServerError(res, err, 'Error deleting section');
+    }
+  });
+
+  app.patch('/api/sections/:id/archive', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const sectionId = parseInt(req.params.id, 10);
+      const { archived } = req.body;
+      if (typeof archived !== 'boolean') {
+        return res.status(400).json({ error: 'archived (boolean) is required' });
+      }
+      const [updated] = await db
+        .update(sections)
+        .set({ isArchived: archived, archivedAt: archived ? new Date() : null })
+        .where(eq(sections.id, sectionId))
+        .returning();
+      if (!updated) {
+        return res.status(404).json({ error: 'Section not found' });
+      }
+      res.json(updated);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error updating section archive state');
+    }
+  });
 
   // Fetch video details and its quiz questions
   app.get("/api/videos/:id", requireAuth, async (req: AuthRequest, res) => {
     try {
       const videoId = parseInt(req.params.id, 10);
       const userId = req.user!.id;
+      const isAdmin = req.user!.role === 'admin';
 
-      const [vid] = await db
-        .select()
-        .from(videos)
-        .where(eq(videos.id, videoId));
-      if (!vid) {
+      const [vid] = await db.select().from(videos).where(eq(videos.id, videoId));
+      if (!vid || (vid.isArchived && !isAdmin)) {
         return res.status(404).json({ error: "Video not found" });
+      }
+
+      if (!isAdmin) {
+        const [assignment] = await db
+          .select({ id: courseAssignments.id })
+          .from(courseAssignments)
+          .where(and(eq(courseAssignments.userId, userId), eq(courseAssignments.sectionId, vid.sectionId)));
+        if (!assignment) {
+          return res.status(403).json({ error: 'You are not assigned to this course' });
+        }
       }
 
       const questions = await db
@@ -614,9 +817,20 @@ async function startServer() {
           ),
         );
 
+      // Most recent watch session gives us the "Resume from mm:ss" position,
+      // even if that session was never marked complete.
+      const [latestSession] = await db
+        .select({ lastPositionSeconds: videoWatchSessions.lastPositionSeconds })
+        .from(videoWatchSessions)
+        .where(and(eq(videoWatchSessions.userId, userId), eq(videoWatchSessions.videoId, videoId)))
+        .orderBy(desc(videoWatchSessions.lastActivityAt))
+        .limit(1);
+
       res.json({
         ...vid,
         quizQuestions: questions,
+        lastPositionSeconds: latestSession?.lastPositionSeconds || 0,
+        completionThreshold: VIDEO_COMPLETION_THRESHOLD,
         progress: prog || {
           percentage: 0,
           watchedFinished: false,
@@ -680,87 +894,172 @@ async function startServer() {
   app.delete("/api/videos/:id", requireAuth, requireAdmin, async (req, res) => {
     try {
       const videoId = parseInt(req.params.id, 10);
+      const [existing] = await db.select().from(videos).where(eq(videos.id, videoId));
+      if (!existing) {
+        return res.status(404).json({ error: 'Video not found' });
+      }
+
+      const hasHistory = await videosHaveHistory([videoId]);
+      if (hasHistory) {
+        await db.update(videos).set({ isArchived: true, archivedAt: new Date() }).where(eq(videos.id, videoId));
+        return res.json({
+          message: 'This video has staff watch or quiz history, so it was archived instead of deleted.',
+          archived: true,
+        });
+      }
+
       await db.delete(quizQuestions).where(eq(quizQuestions.videoId, videoId));
-      await db.delete(userProgress).where(eq(userProgress.videoId, videoId));
       await db.delete(videos).where(eq(videos.id, videoId));
-      res.json({ message: "Video deleted successfully" });
+      res.json({ message: "Video deleted successfully", archived: false });
     } catch (err: any) {
       sendServerError(res, err, "Error deleting video");
     }
   });
 
-  // ----------------------------------------------------
-  // PROGRESS TRACKING & QUIZ EVALUATION
-  // ----------------------------------------------------
-  app.post(
-    "/api/progress/watch",
-    requireAuth,
-    async (req: AuthRequest, res) => {
-      try {
-        const userId = req.user!.id;
-        const { videoId, percentage } = req.body;
-
-        if (!videoId || percentage === undefined) {
-          return res
-            .status(400)
-            .json({ error: "Video ID and percentage are required" });
-        }
-
-        const pct = Math.min(100, Math.max(0, Math.round(percentage)));
-        const watchedFinished = pct >= 95; // 95%+ constitutes finished watching
-
-        const [existing] = await db
-          .select()
-          .from(userProgress)
-          .where(
-            and(
-              eq(userProgress.userId, userId),
-              eq(userProgress.videoId, videoId),
-            ),
-          );
-
-        if (existing) {
-          const newPct = Math.max(existing.percentage, pct);
-          const newFinished = existing.watchedFinished || watchedFinished;
-
-          const [updated] = await db
-            .update(userProgress)
-            .set({
-              percentage: newPct,
-              watchedFinished: newFinished,
-              updatedAt: new Date(),
-            })
-            .where(eq(userProgress.id, existing.id))
-            .returning();
-
-          return res.json(updated);
-        } else {
-          const [inserted] = await db
-            .insert(userProgress)
-            .values({
-              userId,
-              videoId,
-              percentage: pct,
-              watchedFinished,
-              quizCompleted: false,
-              quizScore: 0,
-              passed: false,
-            })
-            .returning();
-
-          return res.json(inserted);
-        }
-      } catch (err: any) {
-        sendServerError(res, err, "Error updating watch progress");
+  app.patch('/api/videos/:id/archive', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const videoId = parseInt(req.params.id, 10);
+      const { archived } = req.body;
+      if (typeof archived !== 'boolean') {
+        return res.status(400).json({ error: 'archived (boolean) is required' });
       }
-    },
-  );
+      const [updated] = await db
+        .update(videos)
+        .set({ isArchived: archived, archivedAt: archived ? new Date() : null })
+        .where(eq(videos.id, videoId))
+        .returning();
+      if (!updated) {
+        return res.status(404).json({ error: 'Video not found' });
+      }
+      res.json(updated);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error updating video archive state');
+    }
+  });
+
+  // ----------------------------------------------------
+  // VIDEO WATCH SESSION TRACKING
+  // ----------------------------------------------------
+  // Opens a new watch session for this "sitting". Staff must be assigned to
+  // the video's section — identity and ownership always come from the
+  // session, never from the request body.
+  app.post('/api/watch-sessions', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const userId = req.user!.id;
+      const isAdmin = req.user!.role === 'admin';
+      const { videoId, startPositionSeconds } = req.body;
+
+      if (!videoId) {
+        return res.status(400).json({ error: 'videoId is required' });
+      }
+
+      const [vid] = await db.select().from(videos).where(eq(videos.id, videoId));
+      if (!vid) {
+        return res.status(404).json({ error: 'Video not found' });
+      }
+
+      if (!isAdmin) {
+        const [assignment] = await db
+          .select({ id: courseAssignments.id })
+          .from(courseAssignments)
+          .where(and(eq(courseAssignments.userId, userId), eq(courseAssignments.sectionId, vid.sectionId)));
+        if (!assignment) {
+          return res.status(403).json({ error: 'You are not assigned to this course' });
+        }
+      }
+
+      const startPos = Math.max(0, Math.round(Number(startPositionSeconds) || 0));
+      const [session] = await db
+        .insert(videoWatchSessions)
+        .values({
+          userId,
+          videoId,
+          startPositionSeconds: startPos,
+          lastPositionSeconds: startPos,
+          videoDurationSeconds: vid.durationSeconds,
+        })
+        .returning();
+
+      res.status(201).json(session);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error opening watch session');
+    }
+  });
+
+  // Periodic heartbeat while actively playing. `activeSecondsDelta` is
+  // clamped server-side so a tampered client can't inflate watched time
+  // beyond what a real heartbeat interval could have produced.
+  app.patch('/api/watch-sessions/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const sessionId = parseInt(req.params.id, 10);
+      const userId = req.user!.id;
+      const { activeSecondsDelta, lastPositionSeconds, videoDurationSeconds, firstPlay } = req.body;
+
+      const [session] = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.id, sessionId));
+      if (!session) {
+        return res.status(404).json({ error: 'Watch session not found' });
+      }
+      if (session.userId !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const updated = await applyWatchSessionUpdate(session, {
+        activeSecondsDelta,
+        lastPositionSeconds,
+        videoDurationSeconds,
+        firstPlay,
+      });
+
+      await syncUserProgressFromSessions(userId, session.videoId);
+
+      res.json(updated);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error updating watch session');
+    }
+  });
+
+  // Final flush on pause/end/tab-hide/navigation-away. Accepts the
+  // application/json content-type navigator.sendBeacon sends, since it goes
+  // through the same express.json() middleware as a normal request.
+  app.post('/api/watch-sessions/:id/close', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const sessionId = parseInt(req.params.id, 10);
+      const userId = req.user!.id;
+      const { exitReason, lastPositionSeconds, activeSecondsDelta } = req.body;
+
+      const [session] = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.id, sessionId));
+      if (!session) {
+        return res.status(404).json({ error: 'Watch session not found' });
+      }
+      if (session.userId !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (session.closedAt) {
+        return res.json(session); // already closed — idempotent for retried beacons
+      }
+
+      const updated = await applyWatchSessionUpdate(session, {
+        activeSecondsDelta,
+        lastPositionSeconds,
+        extra: {
+          closedAt: new Date(),
+          exitReason: typeof exitReason === 'string' ? exitReason.slice(0, 100) : null,
+        },
+      });
+
+      await syncUserProgressFromSessions(userId, session.videoId);
+
+      res.json(updated);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error closing watch session');
+    }
+  });
 
   // Submit quiz answers
   app.post("/api/progress/quiz", requireAuth, async (req: AuthRequest, res) => {
     try {
       const userId = req.user!.id;
-      const { videoId, answers } = req.body; // array of selected option indices e.g. [1, 1, 1]
+      const { videoId, answers, startedAt } = req.body; // array of selected option indices e.g. [1, 1, 1]
 
       if (!videoId || !Array.isArray(answers)) {
         return res
@@ -826,10 +1125,40 @@ async function startServer() {
         .where(eq(userProgress.id, prog.id))
         .returning();
 
+      // Record every attempt for the staff detail report — score/pass are
+      // always computed server-side above, never trusted from the client.
+      const [{ priorAttempts }] = await db
+        .select({ priorAttempts: sql<number>`COUNT(*)` })
+        .from(quizAttempts)
+        .where(and(eq(quizAttempts.userId, userId), eq(quizAttempts.videoId, videoId)));
+      const attemptNumber = Number(priorAttempts) + 1;
+
+      const startedAtDate = typeof startedAt === 'string' ? new Date(startedAt) : null;
+      const submittedAtDate = new Date();
+      const timeSpentSeconds =
+        startedAtDate && !isNaN(startedAtDate.getTime())
+          ? Math.max(0, Math.round((submittedAtDate.getTime() - startedAtDate.getTime()) / 1000))
+          : null;
+
+      await db.insert(quizAttempts).values({
+        userId,
+        videoId,
+        attemptNumber,
+        startedAt: startedAtDate,
+        submittedAt: submittedAtDate,
+        score,
+        maximumScore: totalQuestions,
+        percentage: Math.round((score / totalQuestions) * 100),
+        passed,
+        timeSpentSeconds,
+        answers,
+      });
+
       res.json({
         score,
         total: totalQuestions,
         passed,
+        attemptNumber,
         message: passed
           ? "Congratulations! You passed the quiz (at least 2/3 required). Next section unlocked!"
           : `You scored ${score}/${totalQuestions}. You must score at least 2 out of 3 to pass and proceed. Please review the video and try again!`,
@@ -846,6 +1175,10 @@ async function startServer() {
   // ----------------------------------------------------
   app.get("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
     try {
+      const roleFilter = req.query.role;
+      const roleCondition =
+        roleFilter === 'staff' || roleFilter === 'admin' ? eq(users.role, roleFilter) : sql`true`;
+
       const allUsers = await db
         .select({
           id: users.id,
@@ -860,6 +1193,7 @@ async function startServer() {
         })
         .from(users)
         .leftJoin(homes, eq(users.homeId, homes.id))
+        .where(roleCondition)
         .orderBy(asc(users.id));
 
       res.json(allUsers);
@@ -985,8 +1319,109 @@ async function startServer() {
     },
   );
 
-  // Admin completion report across all staff and homes
-  app.get("/api/admin/reports", requireAuth, requireAdmin, async (req, res) => {
+  // ----------------------------------------------------
+  // TRAINING ASSIGNMENTS
+  // ----------------------------------------------------
+  app.post('/api/admin/assignments', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const { userId, sectionId, required, dueDate } = req.body;
+      if (!userId || !sectionId) {
+        return res.status(400).json({ error: 'userId and sectionId are required' });
+      }
+
+      const [targetUser] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+      if (!targetUser) {
+        return res.status(404).json({ error: 'Staff member not found' });
+      }
+      const [section] = await db.select({ id: sections.id }).from(sections).where(eq(sections.id, sectionId));
+      if (!section) {
+        return res.status(404).json({ error: 'Course not found' });
+      }
+
+      const [existing] = await db
+        .select({ id: courseAssignments.id })
+        .from(courseAssignments)
+        .where(and(eq(courseAssignments.userId, userId), eq(courseAssignments.sectionId, sectionId)));
+      if (existing) {
+        return res.status(409).json({ error: 'This course is already assigned to this staff member' });
+      }
+
+      const [created] = await db
+        .insert(courseAssignments)
+        .values({
+          userId,
+          sectionId,
+          assignedBy: req.user!.id,
+          required: required === undefined ? true : !!required,
+          dueDate: dueDate ? new Date(dueDate) : null,
+        })
+        .returning();
+
+      res.status(201).json(created);
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        return res.status(409).json({ error: 'This course is already assigned to this staff member' });
+      }
+      sendServerError(res, err, 'Error creating assignment');
+    }
+  });
+
+  app.post('/api/admin/assignments/bulk', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const { userIds, sectionIds, required, dueDate } = req.body;
+      if (!Array.isArray(userIds) || userIds.length === 0 || !Array.isArray(sectionIds) || sectionIds.length === 0) {
+        return res.status(400).json({ error: 'userIds and sectionIds arrays are required' });
+      }
+
+      const existing = await db
+        .select({ userId: courseAssignments.userId, sectionId: courseAssignments.sectionId })
+        .from(courseAssignments)
+        .where(and(inArray(courseAssignments.userId, userIds), inArray(courseAssignments.sectionId, sectionIds)));
+      const existingKeys = new Set(existing.map((e) => `${e.userId}:${e.sectionId}`));
+
+      const rowsToInsert: (typeof courseAssignments.$inferInsert)[] = [];
+      for (const uid of userIds) {
+        for (const sid of sectionIds) {
+          if (!existingKeys.has(`${uid}:${sid}`)) {
+            rowsToInsert.push({
+              userId: uid,
+              sectionId: sid,
+              assignedBy: req.user!.id,
+              required: required === undefined ? true : !!required,
+              dueDate: dueDate ? new Date(dueDate) : null,
+            });
+          }
+        }
+      }
+
+      const created = rowsToInsert.length > 0 ? await db.insert(courseAssignments).values(rowsToInsert).returning() : [];
+      res.status(201).json({
+        created: created.length,
+        skipped: userIds.length * sectionIds.length - created.length,
+      });
+    } catch (err: any) {
+      sendServerError(res, err, 'Error creating bulk assignments');
+    }
+  });
+
+  app.delete('/api/admin/assignments/:id', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const [deleted] = await db.delete(courseAssignments).where(eq(courseAssignments.id, id)).returning();
+      if (!deleted) {
+        return res.status(404).json({ error: 'Assignment not found' });
+      }
+      res.json({ message: 'Assignment removed successfully' });
+    } catch (err: any) {
+      sendServerError(res, err, 'Error removing assignment');
+    }
+  });
+
+  // Admin completion report across all staff — richer than a single
+  // percentage: assigned/completed/outstanding counts, average quiz score,
+  // last activity, and a status label, sourced from assignments + watch
+  // sessions + quiz attempts (not just the legacy userProgress percentage).
+  app.get('/api/admin/reports', requireAuth, requireAdmin, async (req, res) => {
     try {
       const staffMembers = await db
         .select({
@@ -999,33 +1434,501 @@ async function startServer() {
         .leftJoin(homes, eq(users.homeId, homes.id))
         .where(eq(users.role, "staff"));
 
-      const allVids = await db.select().from(videos);
+      const allAssignments = await db.select().from(courseAssignments);
+      const allVids = await db.select().from(videos).where(eq(videos.isArchived, false));
       const allProg = await db.select().from(userProgress);
+      const allQuizAttempts = await db.select().from(quizAttempts);
 
       const reports = staffMembers.map((st) => {
-        const userProgs = allProg.filter((p) => p.userId === st.id);
-        const completedVideos = userProgs.filter((p) => p.passed).length;
-        const totalVideos = allVids.length;
-        const overallPercentage =
-          totalVideos > 0
-            ? Math.round((completedVideos / totalVideos) * 100)
-            : 0;
+        const staffAssignments = allAssignments.filter((a) => a.userId === st.id);
+        const assignedSectionIds = new Set(staffAssignments.map((a) => a.sectionId));
+        const assignedVideos = allVids.filter((v) => assignedSectionIds.has(v.sectionId));
+        const staffProgress = allProg.filter((p) => p.userId === st.id);
+        const progressByVideo = new Map(staffProgress.map((p) => [p.videoId, p]));
+
+        const completedVideos = assignedVideos.filter((v) => progressByVideo.get(v.id)?.passed).length;
+        const totalVideos = assignedVideos.length;
+        const outstandingVideos = totalVideos - completedVideos;
+        const completionPercentage = totalVideos > 0 ? Math.round((completedVideos / totalVideos) * 100) : 0;
+
+        const staffQuizAttempts = allQuizAttempts.filter((q) => q.userId === st.id);
+        const avgQuizScore =
+          staffQuizAttempts.length > 0
+            ? Math.round(staffQuizAttempts.reduce((sum, q) => sum + q.percentage, 0) / staffQuizAttempts.length)
+            : null;
+
+        const activityDates = [
+          ...staffProgress.map((p) => p.updatedAt),
+          ...staffQuizAttempts.map((q) => q.submittedAt),
+        ].filter(Boolean) as Date[];
+        const lastActivity =
+          activityDates.length > 0 ? new Date(Math.max(...activityDates.map((d) => new Date(d).getTime()))) : null;
+
+        const status =
+          totalVideos === 0
+            ? 'no_assignments'
+            : completedVideos === 0
+              ? 'not_started'
+              : completedVideos === totalVideos
+                ? 'completed'
+                : 'in_progress';
 
         return {
           userId: st.id,
           username: st.username,
           email: st.email,
-          homeName: st.homeName || "Unassigned",
+          homeName: st.homeName || 'Unassigned',
+          assignedCourses: staffAssignments.length,
           completedVideos,
           totalVideos,
-          overallPercentage,
-          progressDetails: userProgs,
+          outstandingVideos,
+          completionPercentage,
+          avgQuizScore,
+          lastActivity,
+          status,
         };
       });
 
       res.json(reports);
     } catch (err: any) {
       sendServerError(res, err, "Error generating report");
+    }
+  });
+
+  // ----------------------------------------------------
+  // ADMIN DASHBOARD SUMMARY
+  // ----------------------------------------------------
+  app.get('/api/admin/dashboard-summary', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const [[{ count: staffCount }], [{ count: courseCount }], [{ count: videoCount }], [{ count: assignmentCount }]] =
+        await Promise.all([
+          db.select({ count: sql<number>`COUNT(*)` }).from(users).where(eq(users.role, 'staff')),
+          db.select({ count: sql<number>`COUNT(*)` }).from(sections).where(eq(sections.isArchived, false)),
+          db.select({ count: sql<number>`COUNT(*)` }).from(videos).where(eq(videos.isArchived, false)),
+          db.select({ count: sql<number>`COUNT(*)` }).from(courseAssignments),
+        ]);
+
+      const allAssignments = await db.select().from(courseAssignments);
+      const allVids = await db.select().from(videos).where(eq(videos.isArchived, false));
+      const allProg = await db.select().from(userProgress);
+      const progressKey = (u: number, v: number) => `${u}:${v}`;
+      const progressMap = new Map(allProg.map((p) => [progressKey(p.userId, p.videoId), p]));
+
+      let completedAssignments = 0;
+      const outstandingRequiredStaff = new Set<number>();
+      const courseIncompleteCounts = new Map<number, number>();
+
+      for (const a of allAssignments) {
+        const sectionVideos = allVids.filter((v) => v.sectionId === a.sectionId);
+        const total = sectionVideos.length;
+        const done = sectionVideos.filter((v) => progressMap.get(progressKey(a.userId, v.id))?.passed).length;
+        const isComplete = total > 0 && done === total;
+        if (isComplete) {
+          completedAssignments++;
+        } else {
+          courseIncompleteCounts.set(a.sectionId, (courseIncompleteCounts.get(a.sectionId) || 0) + 1);
+          if (a.required) outstandingRequiredStaff.add(a.userId);
+        }
+      }
+
+      const overallCompletionRate =
+        allAssignments.length > 0 ? Math.round((completedAssignments / allAssignments.length) * 100) : 0;
+
+      const [recentSections, recentVideos, recentAssignments, recentCompletions, allSectionsList] = await Promise.all([
+        db.select().from(sections).orderBy(desc(sections.createdAt)).limit(5),
+        db
+          .select({ id: videos.id, title: videos.title, sectionId: videos.sectionId, createdAt: videos.createdAt })
+          .from(videos)
+          .orderBy(desc(videos.createdAt))
+          .limit(5),
+        db
+          .select({
+            id: courseAssignments.id,
+            userId: courseAssignments.userId,
+            sectionId: courseAssignments.sectionId,
+            assignedAt: courseAssignments.assignedAt,
+            username: users.username,
+            sectionTitle: sections.title,
+          })
+          .from(courseAssignments)
+          .leftJoin(users, eq(courseAssignments.userId, users.id))
+          .leftJoin(sections, eq(courseAssignments.sectionId, sections.id))
+          .orderBy(desc(courseAssignments.assignedAt))
+          .limit(5),
+        db
+          .select({
+            id: userProgress.id,
+            userId: userProgress.userId,
+            videoId: userProgress.videoId,
+            updatedAt: userProgress.updatedAt,
+            username: users.username,
+            videoTitle: videos.title,
+          })
+          .from(userProgress)
+          .leftJoin(users, eq(userProgress.userId, users.id))
+          .leftJoin(videos, eq(userProgress.videoId, videos.id))
+          .where(eq(userProgress.passed, true))
+          .orderBy(desc(userProgress.updatedAt))
+          .limit(5),
+        db.select({ id: sections.id, title: sections.title }).from(sections),
+      ]);
+
+      const sectionTitleMap = new Map(allSectionsList.map((s) => [s.id, s.title]));
+      const outstandingCourses = [...courseIncompleteCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([sectionId, incompleteCount]) => ({
+          sectionId,
+          title: sectionTitleMap.get(sectionId) || 'Unknown course',
+          incompleteCount,
+        }));
+
+      res.json({
+        summary: {
+          totalActiveStaff: Number(staffCount),
+          totalActiveCourses: Number(courseCount),
+          totalPublishedVideos: Number(videoCount),
+          totalActiveAssignments: Number(assignmentCount),
+          overallCompletionRate,
+          staffWithOutstandingRequiredTraining: outstandingRequiredStaff.size,
+        },
+        recentActivity: {
+          courses: recentSections,
+          videos: recentVideos,
+          assignments: recentAssignments,
+          completions: recentCompletions,
+        },
+        outstandingTraining: {
+          staffCount: outstandingRequiredStaff.size,
+          topCourses: outstandingCourses,
+        },
+      });
+    } catch (err: any) {
+      sendServerError(res, err, 'Error generating dashboard summary');
+    }
+  });
+
+  // ----------------------------------------------------
+  // STAFF DETAIL REPORT (admin-only drill-down)
+  // ----------------------------------------------------
+  app.get('/api/admin/staff/:staffId', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const [staff] = await db
+        .select({
+          id: users.id,
+          uid: users.uid,
+          email: users.email,
+          username: users.username,
+          role: users.role,
+          homeId: users.homeId,
+          homeName: homes.name,
+          createdAt: users.createdAt,
+          mustChangePassword: users.mustChangePassword,
+        })
+        .from(users)
+        .leftJoin(homes, eq(users.homeId, homes.id))
+        .where(eq(users.id, staffId));
+      if (!staff) {
+        return res.status(404).json({ error: 'Staff member not found' });
+      }
+
+      const [[lastProgress], [lastQuiz], [lastSession]] = await Promise.all([
+        db
+          .select({ updatedAt: userProgress.updatedAt })
+          .from(userProgress)
+          .where(eq(userProgress.userId, staffId))
+          .orderBy(desc(userProgress.updatedAt))
+          .limit(1),
+        db
+          .select({ submittedAt: quizAttempts.submittedAt })
+          .from(quizAttempts)
+          .where(eq(quizAttempts.userId, staffId))
+          .orderBy(desc(quizAttempts.submittedAt))
+          .limit(1),
+        db
+          .select({ lastActivityAt: videoWatchSessions.lastActivityAt })
+          .from(videoWatchSessions)
+          .where(eq(videoWatchSessions.userId, staffId))
+          .orderBy(desc(videoWatchSessions.lastActivityAt))
+          .limit(1),
+      ]);
+
+      const dates = [lastProgress?.updatedAt, lastQuiz?.submittedAt, lastSession?.lastActivityAt].filter(
+        Boolean
+      ) as Date[];
+      const lastActivity = dates.length > 0 ? new Date(Math.max(...dates.map((d) => new Date(d).getTime()))) : null;
+
+      res.json({ ...staff, lastActivity });
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching staff member');
+    }
+  });
+
+  app.get('/api/admin/staff/:staffId/assignments', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const rows = await db
+        .select({
+          id: courseAssignments.id,
+          sectionId: courseAssignments.sectionId,
+          sectionTitle: sections.title,
+          required: courseAssignments.required,
+          dueDate: courseAssignments.dueDate,
+          assignedAt: courseAssignments.assignedAt,
+          assignedBy: courseAssignments.assignedBy,
+          assignedByName: users.username,
+        })
+        .from(courseAssignments)
+        .leftJoin(sections, eq(courseAssignments.sectionId, sections.id))
+        .leftJoin(users, eq(courseAssignments.assignedBy, users.id))
+        .where(eq(courseAssignments.userId, staffId))
+        .orderBy(desc(courseAssignments.assignedAt));
+
+      const sectionIds = rows.map((r) => r.sectionId);
+      const sectionVideosList =
+        sectionIds.length > 0
+          ? await db.select().from(videos).where(and(inArray(videos.sectionId, sectionIds), eq(videos.isArchived, false)))
+          : [];
+      const staffProgress = await db.select().from(userProgress).where(eq(userProgress.userId, staffId));
+      const progressByVideo = new Map(staffProgress.map((p) => [p.videoId, p]));
+
+      const result = rows.map((r) => {
+        const secVideos = sectionVideosList.filter((v) => v.sectionId === r.sectionId);
+        const completedVideos = secVideos.filter((v) => progressByVideo.get(v.id)?.passed).length;
+        const totalVideos = secVideos.length;
+        const lastActivityDates = secVideos
+          .map((v) => progressByVideo.get(v.id)?.updatedAt)
+          .filter(Boolean) as Date[];
+        const lastActivity =
+          lastActivityDates.length > 0
+            ? new Date(Math.max(...lastActivityDates.map((d) => new Date(d).getTime())))
+            : null;
+        const status =
+          totalVideos === 0 || completedVideos === 0
+            ? 'not_started'
+            : completedVideos === totalVideos
+              ? 'completed'
+              : 'in_progress';
+        return {
+          ...r,
+          completedVideos,
+          totalVideos,
+          completionPercentage: totalVideos > 0 ? Math.round((completedVideos / totalVideos) * 100) : 0,
+          status,
+          lastActivity,
+        };
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching staff assignments');
+    }
+  });
+
+  app.get('/api/admin/staff/:staffId/video-activity', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const allVids = await db
+        .select({
+          id: videos.id,
+          title: videos.title,
+          sectionId: videos.sectionId,
+          sectionTitle: sections.title,
+          durationSeconds: videos.durationSeconds,
+        })
+        .from(videos)
+        .leftJoin(sections, eq(videos.sectionId, sections.id));
+
+      const staffSessions = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.userId, staffId));
+      const staffProgress = await db.select().from(userProgress).where(eq(userProgress.userId, staffId));
+      const progressByVideo = new Map(staffProgress.map((p) => [p.videoId, p]));
+
+      const videoIdsWithSessions = new Set(staffSessions.map((s) => s.videoId));
+      const relevantVideos = allVids.filter((v) => videoIdsWithSessions.has(v.id));
+
+      const result = relevantVideos.map((v) => {
+        const vidSessions = staffSessions
+          .filter((s) => s.videoId === v.id)
+          .sort((a, b) => new Date(a.openedAt).getTime() - new Date(b.openedAt).getTime());
+        const firstOpened = vidSessions[0]?.openedAt || null;
+        const lastOpened = vidSessions[vidSessions.length - 1]?.openedAt || null;
+        const totalActiveWatchSeconds = vidSessions.reduce((sum, s) => sum + s.activeWatchSeconds, 0);
+        const lastPositionSeconds = vidSessions[vidSessions.length - 1]?.lastPositionSeconds || 0;
+        const bestPct = vidSessions.reduce((max, s) => Math.max(max, s.completionPercentage), 0);
+        const prog = progressByVideo.get(v.id);
+        const completed = !!prog?.watchedFinished || vidSessions.some((s) => s.completed);
+        const completedAt = vidSessions.find((s) => s.completed)?.completedAt || null;
+
+        return {
+          videoId: v.id,
+          videoTitle: v.title,
+          sectionId: v.sectionId,
+          sectionTitle: v.sectionTitle,
+          firstOpened,
+          lastOpened,
+          numberOfSessions: vidSessions.length,
+          totalActiveWatchSeconds,
+          videoDurationSeconds: v.durationSeconds,
+          lastPositionSeconds,
+          watchedPercentage: bestPct,
+          completed,
+          completedAt,
+        };
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching video activity');
+    }
+  });
+
+  app.get('/api/admin/staff/:staffId/video-activity/:videoId/sessions', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const videoId = parseInt(req.params.videoId, 10);
+      const sessionRows = await db
+        .select()
+        .from(videoWatchSessions)
+        .where(and(eq(videoWatchSessions.userId, staffId), eq(videoWatchSessions.videoId, videoId)))
+        .orderBy(asc(videoWatchSessions.openedAt));
+      res.json(sessionRows);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching watch sessions');
+    }
+  });
+
+  app.get('/api/admin/staff/:staffId/quiz-attempts', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const rows = await db
+        .select({
+          id: quizAttempts.id,
+          videoId: quizAttempts.videoId,
+          videoTitle: videos.title,
+          sectionId: videos.sectionId,
+          sectionTitle: sections.title,
+          attemptNumber: quizAttempts.attemptNumber,
+          startedAt: quizAttempts.startedAt,
+          submittedAt: quizAttempts.submittedAt,
+          score: quizAttempts.score,
+          maximumScore: quizAttempts.maximumScore,
+          percentage: quizAttempts.percentage,
+          passed: quizAttempts.passed,
+          timeSpentSeconds: quizAttempts.timeSpentSeconds,
+        })
+        .from(quizAttempts)
+        .leftJoin(videos, eq(quizAttempts.videoId, videos.id))
+        .leftJoin(sections, eq(videos.sectionId, sections.id))
+        .where(eq(quizAttempts.userId, staffId))
+        .orderBy(desc(quizAttempts.submittedAt));
+      res.json(rows);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching quiz attempts');
+    }
+  });
+
+  app.get('/api/admin/staff/:staffId/completion-history', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const rows = await db
+        .select({
+          videoId: userProgress.videoId,
+          videoTitle: videos.title,
+          sectionId: videos.sectionId,
+          sectionTitle: sections.title,
+          updatedAt: userProgress.updatedAt,
+          percentage: userProgress.percentage,
+          quizScore: userProgress.quizScore,
+          passed: userProgress.passed,
+        })
+        .from(userProgress)
+        .leftJoin(videos, eq(userProgress.videoId, videos.id))
+        .leftJoin(sections, eq(videos.sectionId, sections.id))
+        .where(and(eq(userProgress.userId, staffId), eq(userProgress.passed, true)))
+        .orderBy(desc(userProgress.updatedAt));
+      res.json(rows);
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching completion history');
+    }
+  });
+
+  app.get('/api/admin/staff/:staffId/timeline', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const staffId = parseInt(req.params.staffId, 10);
+      const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
+      const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize || '25'), 10)));
+
+      const [assignmentRows, sessionRows, quizRows] = await Promise.all([
+        db
+          .select({ sectionTitle: sections.title, assignedAt: courseAssignments.assignedAt })
+          .from(courseAssignments)
+          .leftJoin(sections, eq(courseAssignments.sectionId, sections.id))
+          .where(eq(courseAssignments.userId, staffId)),
+        db
+          .select({
+            videoTitle: videos.title,
+            openedAt: videoWatchSessions.openedAt,
+            completed: videoWatchSessions.completed,
+            completedAt: videoWatchSessions.completedAt,
+          })
+          .from(videoWatchSessions)
+          .leftJoin(videos, eq(videoWatchSessions.videoId, videos.id))
+          .where(eq(videoWatchSessions.userId, staffId)),
+        db
+          .select({
+            videoTitle: videos.title,
+            submittedAt: quizAttempts.submittedAt,
+            passed: quizAttempts.passed,
+            percentage: quizAttempts.percentage,
+          })
+          .from(quizAttempts)
+          .leftJoin(videos, eq(quizAttempts.videoId, videos.id))
+          .where(eq(quizAttempts.userId, staffId)),
+      ]);
+
+      type TimelineEvent = { type: string; timestamp: string; description: string };
+      const events: TimelineEvent[] = [];
+
+      for (const a of assignmentRows) {
+        if (!a.assignedAt) continue;
+        events.push({
+          type: 'course_assigned',
+          timestamp: new Date(a.assignedAt).toISOString(),
+          description: `Assigned to "${a.sectionTitle || 'a course'}"`,
+        });
+      }
+      for (const s of sessionRows) {
+        events.push({
+          type: 'video_opened',
+          timestamp: new Date(s.openedAt).toISOString(),
+          description: `Opened "${s.videoTitle || 'a video'}"`,
+        });
+        if (s.completed && s.completedAt) {
+          events.push({
+            type: 'video_completed',
+            timestamp: new Date(s.completedAt).toISOString(),
+            description: `Completed "${s.videoTitle || 'a video'}"`,
+          });
+        }
+      }
+      for (const q of quizRows) {
+        events.push({
+          type: 'quiz_submitted',
+          timestamp: new Date(q.submittedAt).toISOString(),
+          description: `${q.passed ? 'Passed' : 'Failed'} quiz for "${q.videoTitle || 'a video'}" (${q.percentage}%)`,
+        });
+      }
+
+      events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      const totalCount = events.length;
+      const startIdx = (page - 1) * pageSize;
+      const pageItems = events.slice(startIdx, startIdx + pageSize);
+
+      res.json({ events: pageItems, page, pageSize, totalCount, totalPages: Math.ceil(totalCount / pageSize) });
+    } catch (err: any) {
+      sendServerError(res, err, 'Error fetching activity timeline');
     }
   });
 
