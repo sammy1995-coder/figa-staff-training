@@ -33,25 +33,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   const [data, setData] = useState<AdminDashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     (async () => {
       try {
-        const res = await fetch('/api/admin/dashboard-summary', { credentials: 'include' });
+        const res = await fetch('/api/admin/dashboard-summary', {
+          credentials: 'include',
+          signal: controller.signal,
+        });
         const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'Failed to load dashboard summary');
+        if (!res.ok) {
+          const message = typeof json.error === 'string' ? json.error : json.error?.message;
+          throw new Error(message || 'Failed to load dashboard summary');
+        }
         if (!cancelled) setData(json);
       } catch (err: any) {
-        if (!cancelled) setError(err.message || 'Failed to load dashboard summary');
+        if (!cancelled) {
+          setError(
+            err.name === 'AbortError'
+              ? 'The dashboard took too long to load. This can happen when the database is slow to respond.'
+              : err.message || 'Failed to load dashboard summary'
+          );
+        }
       } finally {
+        clearTimeout(timeout);
         if (!cancelled) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
+      clearTimeout(timeout);
+      controller.abort();
     };
-  }, []);
+  }, [retryCount]);
 
   if (loading) {
     return <div className="text-sm text-slate-500 p-8 text-center">Loading dashboard…</div>;
@@ -59,8 +79,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
 
   if (error || !data) {
     return (
-      <div className="p-6 bg-rose-50 border border-rose-200 rounded-2xl text-rose-700 text-sm">
-        {error || 'Failed to load dashboard summary'}
+      <div className="p-6 bg-rose-50 border border-rose-200 rounded-2xl text-rose-700 text-sm space-y-3">
+        <p>{error || 'Failed to load dashboard summary'}</p>
+        <button
+          onClick={() => setRetryCount((n) => n + 1)}
+          className="text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 rounded-lg transition-colors"
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -71,7 +97,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
     { label: 'Active Staff', value: summary.totalActiveStaff, icon: Users, color: 'indigo' },
     { label: 'Active Courses', value: summary.totalActiveCourses, icon: BookOpen, color: 'emerald' },
     { label: 'Published Videos', value: summary.totalPublishedVideos, icon: VideoIcon, color: 'sky' },
-    { label: 'Active Assignments', value: summary.totalActiveAssignments, icon: ClipboardList, color: 'amber' },
     { label: 'Completion Rate', value: `${summary.overallCompletionRate}%`, icon: TrendingUp, color: 'violet' },
     { label: 'Outstanding Required', value: summary.staffWithOutstandingRequiredTraining, icon: AlertTriangle, color: 'rose' },
   ];
@@ -88,7 +113,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   return (
     <div className="space-y-6 select-none">
       {/* Summary Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 sm:gap-4">
         {summaryCards.map((c) => (
           <div key={c.label} className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
             <div className={`w-9 h-9 rounded-xl flex items-center justify-center mb-3 ${colorClasses[c.color]}`}>
@@ -117,7 +142,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
           className="bg-white hover:bg-slate-50 text-slate-900 rounded-2xl p-5 text-left border border-slate-200 shadow-sm transition-all flex items-center justify-between"
         >
           <div>
-            <p className="font-bold text-sm">Manage Courses</p>
+            <p className="font-bold text-sm">Management</p>
             <p className="text-xs text-slate-500 mt-0.5">Upload videos, edit, archive</p>
           </div>
           <ArrowRight className="w-5 h-5 shrink-0 text-slate-400" />

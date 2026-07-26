@@ -76,7 +76,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <>
             {navItem('dashboard', 'Dashboard', LayoutGrid)}
             {navItem('assign', 'Assign Training', ClipboardList)}
-            {navItem('manage', 'Manage Courses', Settings)}
+            {navItem('manage', 'Management', Settings)}
             {navItem('reports', 'Reports', BarChart3)}
           </>
         ) : (

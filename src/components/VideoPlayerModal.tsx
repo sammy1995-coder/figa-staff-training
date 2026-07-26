@@ -357,8 +357,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 </div>
                 <p className="text-xs text-slate-500">
                   {watchedFinished
-                    ? 'Video fully watched! You are ready to complete the quiz below.'
-                    : 'Watch the entire video to unlock the mandatory quiz.'}
+                    ? questions.length > 0
+                      ? 'Video fully watched! You are ready to complete the quiz below.'
+                      : 'Video fully watched! This module is complete.'
+                    : questions.length > 0
+                      ? 'Watch the entire video to unlock the quiz.'
+                      : 'Watch the entire video to complete this module.'}
                 </p>
                 <p className="text-[10px] text-slate-400">
                   Training activity is recorded for completion and compliance reporting.
