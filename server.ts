@@ -1486,27 +1486,53 @@ async function startServer() {
   // sessions + quiz attempts (not just the legacy userProgress percentage).
   app.get('/api/admin/reports', requireAuth, requireAdmin, async (req, res) => {
     try {
-      const staffMembers = await db
-        .select({
-          id: users.id,
-          username: users.username,
-          email: users.email,
-          homeName: homes.name,
-        })
-        .from(users)
-        .leftJoin(homes, eq(users.homeId, homes.id))
-        .where(eq(users.role, "staff"));
+      const [staffMembers, allAssignments, allVids, allProg, allQuizAttempts] = await Promise.all([
+        db
+          .select({
+            id: users.id,
+            username: users.username,
+            email: users.email,
+            homeName: homes.name,
+          })
+          .from(users)
+          .leftJoin(homes, eq(users.homeId, homes.id))
+          .where(eq(users.role, 'staff')),
+        db.select().from(courseAssignments),
+        db.select({ id: videos.id, sectionId: videos.sectionId }).from(videos).where(eq(videos.isArchived, false)),
+        db.select().from(userProgress),
+        db.select().from(quizAttempts),
+      ]);
 
-      const allAssignments = await db.select().from(courseAssignments);
-      const allVids = await db.select().from(videos).where(eq(videos.isArchived, false));
-      const allProg = await db.select().from(userProgress);
-      const allQuizAttempts = await db.select().from(quizAttempts);
+      const assignmentsByUser = new Map<number, typeof allAssignments>();
+      for (const a of allAssignments) {
+        const list = assignmentsByUser.get(a.userId);
+        if (list) list.push(a);
+        else assignmentsByUser.set(a.userId, [a]);
+      }
+      const videosBySection = new Map<number, typeof allVids>();
+      for (const v of allVids) {
+        const list = videosBySection.get(v.sectionId);
+        if (list) list.push(v);
+        else videosBySection.set(v.sectionId, [v]);
+      }
+      const progressByUser = new Map<number, typeof allProg>();
+      for (const p of allProg) {
+        const list = progressByUser.get(p.userId);
+        if (list) list.push(p);
+        else progressByUser.set(p.userId, [p]);
+      }
+      const quizAttemptsByUser = new Map<number, typeof allQuizAttempts>();
+      for (const q of allQuizAttempts) {
+        const list = quizAttemptsByUser.get(q.userId);
+        if (list) list.push(q);
+        else quizAttemptsByUser.set(q.userId, [q]);
+      }
 
       const reports = staffMembers.map((st) => {
-        const staffAssignments = allAssignments.filter((a) => a.userId === st.id);
+        const staffAssignments = assignmentsByUser.get(st.id) || [];
         const assignedSectionIds = new Set(staffAssignments.map((a) => a.sectionId));
-        const assignedVideos = allVids.filter((v) => assignedSectionIds.has(v.sectionId));
-        const staffProgress = allProg.filter((p) => p.userId === st.id);
+        const assignedVideos = [...assignedSectionIds].flatMap((sectionId) => videosBySection.get(sectionId) || []);
+        const staffProgress = progressByUser.get(st.id) || [];
         const progressByVideo = new Map(staffProgress.map((p) => [p.videoId, p]));
 
         const completedVideos = assignedVideos.filter((v) => progressByVideo.get(v.id)?.passed).length;
@@ -1514,7 +1540,7 @@ async function startServer() {
         const outstandingVideos = totalVideos - completedVideos;
         const completionPercentage = totalVideos > 0 ? Math.round((completedVideos / totalVideos) * 100) : 0;
 
-        const staffQuizAttempts = allQuizAttempts.filter((q) => q.userId === st.id);
+        const staffQuizAttempts = quizAttemptsByUser.get(st.id) || [];
         const avgQuizScore =
           staffQuizAttempts.length > 0
             ? Math.round(staffQuizAttempts.reduce((sum, q) => sum + q.percentage, 0) / staffQuizAttempts.length)
@@ -1563,43 +1589,32 @@ async function startServer() {
   // ----------------------------------------------------
   app.get('/api/admin/dashboard-summary', requireAuth, requireAdmin, async (req, res) => {
     try {
-      const [[{ count: staffCount }], [{ count: courseCount }], [{ count: videoCount }], [{ count: assignmentCount }]] =
-        await Promise.all([
-          db.select({ count: sql<number>`COUNT(*)` }).from(users).where(eq(users.role, 'staff')),
-          db.select({ count: sql<number>`COUNT(*)` }).from(sections).where(eq(sections.isArchived, false)),
-          db.select({ count: sql<number>`COUNT(*)` }).from(videos).where(eq(videos.isArchived, false)),
-          db.select({ count: sql<number>`COUNT(*)` }).from(courseAssignments),
-        ]);
-
-      const [allAssignments, allVids, allProg] = await Promise.all([
+      const [
+        counts,
+        allAssignments,
+        allVids,
+        allProg,
+        recentSections,
+        recentVideos,
+        recentAssignments,
+        recentCompletions,
+        allSectionsList,
+      ] = await Promise.all([
+        // Four independent counts in one round trip instead of four —
+        // each round trip to the hosted DB costs ~150-250ms regardless of
+        // how small the result is, so merging is the cheapest win here.
+        db.execute<{ staff_count: number; course_count: number; video_count: number; assignment_count: number }>(sql`
+          SELECT
+            (SELECT COUNT(*) FROM ${users} WHERE ${users.role} = 'staff') AS staff_count,
+            (SELECT COUNT(*) FROM ${sections} WHERE ${sections.isArchived} = false) AS course_count,
+            (SELECT COUNT(*) FROM ${videos} WHERE ${videos.isArchived} = false) AS video_count,
+            (SELECT COUNT(*) FROM ${courseAssignments}) AS assignment_count
+        `),
         db.select().from(courseAssignments),
-        db.select().from(videos).where(eq(videos.isArchived, false)),
+        // Only id/sectionId are actually used below — avoid pulling title/
+        // description/url for every video on every dashboard load.
+        db.select({ id: videos.id, sectionId: videos.sectionId }).from(videos).where(eq(videos.isArchived, false)),
         db.select().from(userProgress),
-      ]);
-      const progressKey = (u: number, v: number) => `${u}:${v}`;
-      const progressMap = new Map(allProg.map((p) => [progressKey(p.userId, p.videoId), p]));
-
-      let completedAssignments = 0;
-      const outstandingRequiredStaff = new Set<number>();
-      const courseIncompleteCounts = new Map<number, number>();
-
-      for (const a of allAssignments) {
-        const sectionVideos = allVids.filter((v) => v.sectionId === a.sectionId);
-        const total = sectionVideos.length;
-        const done = sectionVideos.filter((v) => progressMap.get(progressKey(a.userId, v.id))?.passed).length;
-        const isComplete = total > 0 && done === total;
-        if (isComplete) {
-          completedAssignments++;
-        } else {
-          courseIncompleteCounts.set(a.sectionId, (courseIncompleteCounts.get(a.sectionId) || 0) + 1);
-          if (a.required) outstandingRequiredStaff.add(a.userId);
-        }
-      }
-
-      const overallCompletionRate =
-        allAssignments.length > 0 ? Math.round((completedAssignments / allAssignments.length) * 100) : 0;
-
-      const [recentSections, recentVideos, recentAssignments, recentCompletions, allSectionsList] = await Promise.all([
         db.select().from(sections).orderBy(desc(sections.createdAt)).limit(5),
         db
           .select({ id: videos.id, title: videos.title, sectionId: videos.sectionId, createdAt: videos.createdAt })
@@ -1638,6 +1653,35 @@ async function startServer() {
         db.select({ id: sections.id, title: sections.title }).from(sections),
       ]);
 
+      const progressKey = (u: number, v: number) => `${u}:${v}`;
+      const progressMap = new Map(allProg.map((p) => [progressKey(p.userId, p.videoId), p]));
+      const videosBySection = new Map<number, typeof allVids>();
+      for (const v of allVids) {
+        const list = videosBySection.get(v.sectionId);
+        if (list) list.push(v);
+        else videosBySection.set(v.sectionId, [v]);
+      }
+
+      let completedAssignments = 0;
+      const outstandingRequiredStaff = new Set<number>();
+      const courseIncompleteCounts = new Map<number, number>();
+
+      for (const a of allAssignments) {
+        const sectionVideos = videosBySection.get(a.sectionId) || [];
+        const total = sectionVideos.length;
+        const done = sectionVideos.filter((v) => progressMap.get(progressKey(a.userId, v.id))?.passed).length;
+        const isComplete = total > 0 && done === total;
+        if (isComplete) {
+          completedAssignments++;
+        } else {
+          courseIncompleteCounts.set(a.sectionId, (courseIncompleteCounts.get(a.sectionId) || 0) + 1);
+          if (a.required) outstandingRequiredStaff.add(a.userId);
+        }
+      }
+
+      const overallCompletionRate =
+        allAssignments.length > 0 ? Math.round((completedAssignments / allAssignments.length) * 100) : 0;
+
       const sectionTitleMap = new Map(allSectionsList.map((s) => [s.id, s.title]));
       const outstandingCourses = [...courseIncompleteCounts.entries()]
         .sort((a, b) => b[1] - a[1])
@@ -1648,12 +1692,14 @@ async function startServer() {
           incompleteCount,
         }));
 
+      const countsRow = counts.rows[0];
+
       res.json({
         summary: {
-          totalActiveStaff: Number(staffCount),
-          totalActiveCourses: Number(courseCount),
-          totalPublishedVideos: Number(videoCount),
-          totalActiveAssignments: Number(assignmentCount),
+          totalActiveStaff: Number(countsRow.staff_count),
+          totalActiveCourses: Number(countsRow.course_count),
+          totalPublishedVideos: Number(countsRow.video_count),
+          totalActiveAssignments: Number(countsRow.assignment_count),
           overallCompletionRate,
           staffWithOutstandingRequiredTraining: outstandingRequiredStaff.size,
         },
