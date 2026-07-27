@@ -901,6 +901,67 @@ async function startServer() {
     }
   });
 
+  // Edit an already-published video: section, title, description, URL, and
+  // its quiz questions can all still change after the fact. `questions` (if
+  // provided) fully replaces the existing quiz set for this video — old
+  // quiz-attempt records aren't affected since they store their own
+  // score/answers snapshot rather than referencing quizQuestions rows.
+  app.put("/api/videos/:id", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const videoId = parseInt(req.params.id, 10);
+      const [existing] = await db.select().from(videos).where(eq(videos.id, videoId));
+      if (!existing) {
+        return res.status(404).json({ error: "Video not found" });
+      }
+
+      const { sectionId, title, description, url, durationSeconds, questions } =
+        req.body;
+
+      if (!sectionId || !title || !url) {
+        return res
+          .status(400)
+          .json({ error: "Section ID, title, and video URL are required" });
+      }
+
+      const [updatedVid] = await db
+        .update(videos)
+        .set({
+          sectionId,
+          title,
+          description: description || "",
+          url,
+          durationSeconds: durationSeconds || existing.durationSeconds,
+        })
+        .where(eq(videos.id, videoId))
+        .returning();
+
+      let updatedQuestions = null;
+      if (Array.isArray(questions)) {
+        await db.delete(quizQuestions).where(eq(quizQuestions.videoId, videoId));
+        if (questions.length > 0) {
+          updatedQuestions = await db
+            .insert(quizQuestions)
+            .values(
+              questions.map((q: any) => ({
+                videoId,
+                question: q.question,
+                options: q.options,
+                correctIndex: q.correctIndex,
+                explanation: q.explanation || "",
+              })),
+            )
+            .returning();
+        } else {
+          updatedQuestions = [];
+        }
+      }
+
+      res.json({ ...updatedVid, quizQuestions: updatedQuestions ?? undefined });
+    } catch (err: any) {
+      sendServerError(res, err, "Error updating video");
+    }
+  });
+
   app.delete("/api/videos/:id", requireAuth, requireAdmin, async (req, res) => {
     try {
       const videoId = parseInt(req.params.id, 10);

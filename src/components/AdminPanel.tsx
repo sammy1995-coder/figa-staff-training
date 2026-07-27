@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Section, Home, User, Video as VideoType } from "../types";
+import { Section, Home, User, Video as VideoType, QuizQuestion } from "../types";
 import {
   Plus,
   Video,
@@ -13,6 +13,7 @@ import {
   Youtube,
   Archive,
   ArchiveRestore,
+  X,
 } from "lucide-react";
 import { extractYouTubeVideoId } from "../lib/youtube";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -71,6 +72,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [sectionToDelete, setSectionToDelete] = useState<Section | null>(null);
   const [videoToDelete, setVideoToDelete] = useState<{ video: VideoType; sectionTitle: string } | null>(null);
   const [isDeletingCourseItem, setIsDeletingCourseItem] = useState(false);
+
+  // Video edit state — lets an admin change a published video's section,
+  // title, URL, and quiz questions after the fact.
+  const [editingVideoId, setEditingVideoId] = useState<number | null>(null);
+  const [isLoadingEditVideo, setIsLoadingEditVideo] = useState(false);
+  const [isSavingVideoEdit, setIsSavingVideoEdit] = useState(false);
+  const [editVideoErr, setEditVideoErr] = useState<string | null>(null);
+  const [editSectionId, setEditSectionId] = useState<number>(0);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editUrl, setEditUrl] = useState('');
+  const [editQ1, setEditQ1] = useState('');
+  const [editQ2, setEditQ2] = useState('');
+  const [editQ3, setEditQ3] = useState('');
+  // The video's existing quiz questions as loaded from the server, keyed by
+  // slot index — used to preserve each question's options/correctIndex when
+  // only its wording changes, and as the source for the default option
+  // templates when a slot is newly filled in.
+  const [editExistingQuestions, setEditExistingQuestions] = useState<QuizQuestion[]>([]);
 
   // User Management State
   const [allUsers, setAllUsers] = useState<User[]>([]);
@@ -405,6 +425,98 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       setVideoToDelete(null);
     } finally {
       setIsDeletingCourseItem(false);
+    }
+  };
+
+  const startEditVideo = async (video: VideoType) => {
+    setEditVideoErr(null);
+    setEditingVideoId(video.id);
+    setIsLoadingEditVideo(true);
+    setEditSectionId(video.sectionId);
+    setEditTitle(video.title);
+    setEditDescription(video.description || '');
+    setEditUrl(video.url);
+    setEditQ1('');
+    setEditQ2('');
+    setEditQ3('');
+    setEditExistingQuestions([]);
+
+    try {
+      const res = await fetch(`/api/videos/${video.id}`, { credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load video details');
+
+      const existing: QuizQuestion[] = data.quizQuestions || [];
+      setEditExistingQuestions(existing);
+      setEditQ1(existing[0]?.question || '');
+      setEditQ2(existing[1]?.question || '');
+      setEditQ3(existing[2]?.question || '');
+    } catch (err: any) {
+      setEditVideoErr(err.message || 'Failed to load video details');
+    } finally {
+      setIsLoadingEditVideo(false);
+    }
+  };
+
+  const cancelEditVideo = () => {
+    setEditingVideoId(null);
+    setEditVideoErr(null);
+  };
+
+  const handleSaveVideoEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingVideoId) return;
+    setEditVideoErr(null);
+
+    const defaultOptsBySlot = [
+      { options: ['Ignore alarm', 'Evacuate immediately', 'Wait 1 hour', 'Lock door'], correctIndex: 1 },
+      { options: ['Inside kitchen', 'Outside assembly point', 'In parking space', 'In elevator'], correctIndex: 1 },
+      { options: ['Every 10 years', 'Regularly per policy', 'Never', 'Once on real fire'], correctIndex: 1 },
+    ];
+
+    // Each slot's options/correctIndex carry over from the question that was
+    // already there (so editing wording doesn't discard the answer key); a
+    // newly-filled slot falls back to the same canned template the "add
+    // video" form uses.
+    const questions = [editQ1, editQ2, editQ3]
+      .map((questionText, idx) => {
+        const trimmed = questionText.trim();
+        if (!trimmed) return null;
+        const existing = editExistingQuestions[idx];
+        const template = defaultOptsBySlot[idx];
+        return {
+          question: trimmed,
+          options: existing?.options || template.options,
+          correctIndex: existing?.correctIndex ?? template.correctIndex,
+          explanation: existing?.explanation || '',
+        };
+      })
+      .filter((q): q is NonNullable<typeof q> => q !== null);
+
+    setIsSavingVideoEdit(true);
+    try {
+      const res = await fetch(`/api/videos/${editingVideoId}`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sectionId: editSectionId,
+          title: editTitle,
+          description: editDescription,
+          url: editUrl,
+          questions,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save changes');
+
+      setCourseMsg(`"${editTitle}" was updated successfully.`);
+      setEditingVideoId(null);
+      onRefreshData();
+    } catch (err: any) {
+      setEditVideoErr(err.message || 'Failed to save changes');
+    } finally {
+      setIsSavingVideoEdit(false);
     }
   };
 
@@ -870,6 +982,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
                         </p>
                         <div className="flex items-center gap-1 shrink-0">
                           <button
+                            onClick={() => startEditVideo(v)}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                            title="Edit video"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => toggleVideoArchive(v)}
                             disabled={busyKey === `video-${v.id}`}
                             className="px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50 transition-all"
@@ -1273,6 +1392,135 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           onConfirm={executeDeleteVideo}
           onCancel={() => setVideoToDelete(null)}
         />
+      )}
+
+      {/* EDIT VIDEO MODAL */}
+      {editingVideoId !== null && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <form
+            onSubmit={handleSaveVideoEdit}
+            className="bg-white rounded-[28px] max-w-2xl w-full my-8 p-6 shadow-2xl space-y-4 border border-slate-100"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-lg font-bold text-slate-900">Edit Training Video</h3>
+              <button
+                type="button"
+                onClick={cancelEditVideo}
+                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {isLoadingEditVideo ? (
+              <p className="text-sm text-slate-500 py-8 text-center">Loading video details…</p>
+            ) : (
+              <>
+                {editVideoErr && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-rose-700 text-xs font-medium flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" /> {editVideoErr}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Section</label>
+                    <select
+                      value={editSectionId}
+                      onChange={(e) => setEditSectionId(parseInt(e.target.value, 10))}
+                      className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900"
+                    >
+                      {sections.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Video Title</label>
+                    <input
+                      type="text"
+                      required
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">YouTube Video URL</label>
+                  <input
+                    type="url"
+                    required
+                    value={editUrl}
+                    onChange={(e) => setEditUrl(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-2xl bg-white border border-slate-200 text-xs font-mono text-slate-900"
+                  />
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 space-y-3">
+                  <div>
+                    <h4 className="font-bold text-sm text-slate-800">Quiz Questions (Optional)</h4>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Add up to 3 questions, or leave all of them blank to remove the quiz from this video.
+                    </p>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                    <label className="block text-xs font-bold text-indigo-600 uppercase">Question 1 (optional)</label>
+                    <input
+                      type="text"
+                      value={editQ1}
+                      onChange={(e) => setEditQ1(e.target.value)}
+                      placeholder="Leave blank to skip"
+                      className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-900"
+                    />
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                    <label className="block text-xs font-bold text-indigo-600 uppercase">Question 2 (optional)</label>
+                    <input
+                      type="text"
+                      value={editQ2}
+                      onChange={(e) => setEditQ2(e.target.value)}
+                      placeholder="Leave blank to skip"
+                      className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-900"
+                    />
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                    <label className="block text-xs font-bold text-indigo-600 uppercase">Question 3 (optional)</label>
+                    <input
+                      type="text"
+                      value={editQ3}
+                      onChange={(e) => setEditQ3(e.target.value)}
+                      placeholder="Leave blank to skip"
+                      className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-900"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    disabled={isSavingVideoEdit}
+                    onClick={cancelEditVideo}
+                    className="px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingVideoEdit}
+                    className="px-5 py-2.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-200 transition-all disabled:opacity-60"
+                  >
+                    {isSavingVideoEdit ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </>
+            )}
+          </form>
+        </div>
       )}
 
       {/* DELETE HOME CONFIRMATION MODAL */}
