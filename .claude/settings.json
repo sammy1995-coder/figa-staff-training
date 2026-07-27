@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tasklist)",
+      "Bash(netstat -ano)",
+      "Bash(curl -s -o /dev/null -w \"health: %{http_code}\\\\n\" http://localhost:3000/api/health --max-time 8)",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code} in %{time_total}s\\\\n\" http://localhost:3000/api/admin/dashboard-summary --max-time 20)",
+      "Bash(NODE_OPTIONS=\"--max-old-space-size=4096\" npx tsc --noEmit)",
+      "Bash(wmic OS get FreePhysicalMemory,TotalVisibleMemorySize)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize\")",
+      "Bash(wmic process *)",
+      "Bash(NODE_OPTIONS=\"--max-old-space-size=768\" npx tsc --noEmit)",
+      "Bash(taskkill //PID 1484 //F)",
+      "Bash(curl -s -w \"\\\\nhealth: %{http_code}\\\\n\" http://localhost:3000/api/health --max-time 8)"
+    ]
+  }
+}

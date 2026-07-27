@@ -36,38 +36,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
   const [videoUrl, setVideoUrl] = useState('');
   const [duration, setDuration] = useState(180);
 
-  // 3 Quiz Questions State
-  const [q1Question, setQ1Question] = useState(
-    "What is the primary action when alarm sounds?",
-  );
-  const [q1Opts, setQ1Opts] = useState([
-    "Ignore alarm",
-    "Evacuate immediately",
-    "Wait 1 hour",
-    "Lock door",
-  ]);
+  // Up to 3 optional quiz questions — an admin may leave all of them blank
+  // to publish a video with no quiz at all.
+  const [q1Question, setQ1Question] = useState('');
+  const [q1Opts, setQ1Opts] = useState(['Ignore alarm', 'Evacuate immediately', 'Wait 1 hour', 'Lock door']);
   const [q1Correct, setQ1Correct] = useState(1);
 
-  const [q2Question, setQ2Question] = useState(
-    "Where should staff gather after evacuating?",
-  );
-  const [q2Opts, setQ2Opts] = useState([
-    "Inside kitchen",
-    "Outside assembly point",
-    "In parking space",
-    "In elevator",
-  ]);
+  const [q2Question, setQ2Question] = useState('');
+  const [q2Opts, setQ2Opts] = useState(['Inside kitchen', 'Outside assembly point', 'In parking space', 'In elevator']);
   const [q2Correct, setQ2Correct] = useState(1);
 
-  const [q3Question, setQ3Question] = useState(
-    "How often are fire drills required?",
-  );
-  const [q3Opts, setQ3Opts] = useState([
-    "Every 10 years",
-    "Regularly per policy",
-    "Never",
-    "Once on real fire",
-  ]);
+  const [q3Question, setQ3Question] = useState('');
+  const [q3Opts, setQ3Opts] = useState(['Every 10 years', 'Regularly per policy', 'Never', 'Once on real fire']);
   const [q3Correct, setQ3Correct] = useState(1);
 
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
@@ -182,11 +162,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       return;
     }
 
+    // Quiz questions are optional — an admin may publish a video with none,
+    // one, two, or all three. Only non-empty question slots are sent.
     const questions = [
       { question: q1Question, options: q1Opts, correctIndex: q1Correct },
       { question: q2Question, options: q2Opts, correctIndex: q2Correct },
       { question: q3Question, options: q3Opts, correctIndex: q3Correct },
-    ];
+    ].filter((q) => q.question.trim() !== '');
 
     try {
       let sectionId = selectedSectionId;
@@ -226,7 +208,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to upload video");
 
-      setUploadMsg('Training video module and 3 quiz questions created successfully!');
+      setUploadMsg(
+        questions.length > 0
+          ? `Training video module and ${questions.length} quiz question${questions.length === 1 ? '' : 's'} created successfully!`
+          : 'Training video module created successfully (no quiz added).'
+      );
       setVideoTitle('');
       setVideoDesc('');
       setVideoUrl('');
@@ -618,7 +604,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           className="bg-white rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-8 border border-slate-200 shadow-sm space-y-6"
         >
           <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-3">
-            Add New Training Video & 3 Quiz Questions
+            Add New Training Video
           </h3>
 
           {uploadMsg && (
@@ -736,48 +722,46 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, sections, h
           </div>
 
           <div className="pt-4 border-t border-slate-100 space-y-4">
-            <h4 className="font-bold text-sm text-slate-800">
-              Mandatory 3 Quiz Questions (2/3 score required to pass)
-            </h4>
+            <div>
+              <h4 className="font-bold text-sm text-slate-800">Quiz Questions (Optional)</h4>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Add up to 3 questions, or leave all of them blank to publish this video without a quiz.
+                Staff need at least 2/3 correct to pass when a quiz is added.
+              </p>
+            </div>
 
             {/* Q1 */}
             <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-              <label className="block text-xs font-bold text-indigo-600 uppercase">
-                Question 1
-              </label>
+              <label className="block text-xs font-bold text-indigo-600 uppercase">Question 1 (optional)</label>
               <input
                 type="text"
-                required
                 value={q1Question}
                 onChange={(e) => setQ1Question(e.target.value)}
+                placeholder="Leave blank to skip"
                 className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-900"
               />
             </div>
 
             {/* Q2 */}
             <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-              <label className="block text-xs font-bold text-indigo-600 uppercase">
-                Question 2
-              </label>
+              <label className="block text-xs font-bold text-indigo-600 uppercase">Question 2 (optional)</label>
               <input
                 type="text"
-                required
                 value={q2Question}
                 onChange={(e) => setQ2Question(e.target.value)}
+                placeholder="Leave blank to skip"
                 className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-900"
               />
             </div>
 
             {/* Q3 */}
             <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-              <label className="block text-xs font-bold text-indigo-600 uppercase">
-                Question 3
-              </label>
+              <label className="block text-xs font-bold text-indigo-600 uppercase">Question 3 (optional)</label>
               <input
                 type="text"
-                required
                 value={q3Question}
                 onChange={(e) => setQ3Question(e.target.value)}
+                placeholder="Leave blank to skip"
                 className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-900"
               />
             </div>

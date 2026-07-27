@@ -186,14 +186,24 @@ async function syncUserProgressFromSessions(userId: number, videoId: number) {
   const bestPct = allSessions.reduce((max, s) => Math.max(max, s.completionPercentage), 0);
   const finished = allSessions.some((s) => s.completed);
 
+  // Quizzes are optional per video. A video with no quiz questions has
+  // nothing to unlock "passed" via /api/progress/quiz, so finishing the
+  // watch is itself the completion signal for that video.
+  const [{ count: quizCount }] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(quizQuestions)
+    .where(eq(quizQuestions.videoId, videoId));
+  const autoPassed = finished && Number(quizCount) === 0;
+
   await db
     .insert(userProgress)
-    .values({ userId, videoId, percentage: bestPct, watchedFinished: finished })
+    .values({ userId, videoId, percentage: bestPct, watchedFinished: finished, passed: autoPassed })
     .onConflictDoUpdate({
       target: [userProgress.userId, userProgress.videoId],
       set: {
         percentage: sql`GREATEST(${userProgress.percentage}, ${bestPct})`,
         watchedFinished: sql`${userProgress.watchedFinished} OR ${finished}`,
+        passed: sql`${userProgress.passed} OR ${autoPassed}`,
         updatedAt: new Date(),
       },
     });
@@ -1508,9 +1518,11 @@ async function startServer() {
           db.select({ count: sql<number>`COUNT(*)` }).from(courseAssignments),
         ]);
 
-      const allAssignments = await db.select().from(courseAssignments);
-      const allVids = await db.select().from(videos).where(eq(videos.isArchived, false));
-      const allProg = await db.select().from(userProgress);
+      const [allAssignments, allVids, allProg] = await Promise.all([
+        db.select().from(courseAssignments),
+        db.select().from(videos).where(eq(videos.isArchived, false)),
+        db.select().from(userProgress),
+      ]);
       const progressKey = (u: number, v: number) => `${u}:${v}`;
       const progressMap = new Map(allProg.map((p) => [progressKey(p.userId, p.videoId), p]));
 
