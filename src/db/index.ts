@@ -34,6 +34,17 @@ function buildPoolConfig(): PoolConfig {
       connectionString: databaseUrl,
       max: 10,
       connectionTimeoutMillis: 15000,
+      // The DB is a remote hosted instance (e.g. Supabase), so each new TCP+TLS
+      // connection costs ~1.5-2.5s of round trips before a query even runs.
+      // Keep idle connections open longer than the pg default (10s) to reuse
+      // them across admin page navigations, but still recycle periodically —
+      // holding them forever (idleTimeoutMillis: 0) let connections go stale
+      // after Supabase's pooler or an intermediate network hop silently
+      // dropped them, causing queries sent on the dead socket to hang.
+      idleTimeoutMillis: 60_000,
+      // Fail a hung/dead-connection query instead of waiting on it forever.
+      query_timeout: 20_000,
+      keepAlive: true,
       ssl,
     };
   }
@@ -57,6 +68,9 @@ function buildPoolConfig(): PoolConfig {
     database: process.env.SQL_DB_NAME,
     max: 10,
     connectionTimeoutMillis: 15000,
+    idleTimeoutMillis: 60_000,
+    query_timeout: 20_000,
+    keepAlive: true,
     ssl,
   };
 }
@@ -69,6 +83,12 @@ export const createPool = () => {
       // A broken idle client should never crash the whole process.
       console.error('[db] Unexpected error on idle SQL pool client:', err.message);
     });
+
+    // Open a few connections up front instead of waiting for the first
+    // request to pay the connect cost. Errors here are non-fatal — the pool
+    // will just retry lazily on the next real query.
+    const pool = global._postgresPool;
+    Promise.all([pool.query('SELECT 1'), pool.query('SELECT 1'), pool.query('SELECT 1')]).catch(() => {});
   }
   return global._postgresPool;
 };
