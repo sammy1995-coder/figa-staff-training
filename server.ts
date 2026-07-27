@@ -1035,7 +1035,7 @@ async function startServer() {
     try {
       const sessionId = parseInt(req.params.id, 10);
       const userId = req.user!.id;
-      const { exitReason, lastPositionSeconds, activeSecondsDelta } = req.body;
+      const { exitReason, lastPositionSeconds, activeSecondsDelta, videoDurationSeconds } = req.body;
 
       const [session] = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.id, sessionId));
       if (!session) {
@@ -1051,6 +1051,7 @@ async function startServer() {
       const updated = await applyWatchSessionUpdate(session, {
         activeSecondsDelta,
         lastPositionSeconds,
+        videoDurationSeconds,
         extra: {
           closedAt: new Date(),
           exitReason: typeof exitReason === 'string' ? exitReason.slice(0, 100) : null,
@@ -1106,19 +1107,11 @@ async function startServer() {
           .json({ error: "No quiz questions available for this video" });
       }
 
+      // Scored server-side only — correct answers are never sent back to the
+      // client, so a student can't inspect the API response to see them.
       let score = 0;
-      const questionResults = questions.map((q, idx) => {
-        const userChoice = answers[idx];
-        const isCorrect = userChoice === q.correctIndex;
-        if (isCorrect) score++;
-        return {
-          questionId: q.id,
-          question: q.question,
-          userChoice,
-          correctIndex: q.correctIndex,
-          isCorrect,
-          explanation: q.explanation,
-        };
+      questions.forEach((q, idx) => {
+        if (answers[idx] === q.correctIndex) score++;
       });
 
       const totalQuestions = questions.length;
@@ -1172,7 +1165,6 @@ async function startServer() {
         message: passed
           ? "Congratulations! You passed the quiz (at least 2/3 required). Next section unlocked!"
           : `You scored ${score}/${totalQuestions}. You must score at least 2 out of 3 to pass and proceed. Please review the video and try again!`,
-        questionResults,
         progress: updatedProg,
       });
     } catch (err: any) {
