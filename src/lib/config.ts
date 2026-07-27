@@ -16,3 +16,16 @@ export const VIDEO_COMPLETION_THRESHOLD = readThreshold();
 // claimed active-watch delta so a tampered client can't inflate totals.
 export const HEARTBEAT_INTERVAL_SECONDS = 15;
 export const HEARTBEAT_DELTA_MAX_SECONDS = HEARTBEAT_INTERVAL_SECONDS + 10; // small slack for jitter
+
+// Resolves the app's own public base URL for self-referential links (e.g.
+// email templates, OAuth callbacks). Explicit APP_URL always wins; on Vercel
+// falls back to the stable production domain (not VERCEL_URL, which is a
+// unique per-deployment URL that changes every deploy); otherwise assumes
+// local dev.
+export function getAppUrl(): string {
+  if (process.env.APP_URL) return process.env.APP_URL;
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  }
+  return 'http://localhost:3000';
+}
