@@ -1,7 +1,7 @@
 import * as dotenv from 'dotenv';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool, type PoolConfig } from 'pg';
-import * as schema from './schema.ts';
+import * as schema from './schema.js';
 
 // Must run before buildPoolConfig() reads process.env below. This module is
 // intentionally self-contained on env loading rather than relying on the

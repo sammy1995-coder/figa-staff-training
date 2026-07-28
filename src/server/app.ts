@@ -1,6 +1,6 @@
 import express from 'express';
 import * as dotenv from 'dotenv';
-import { db, checkDatabaseConnection } from '../db/index.ts';
+import { db, checkDatabaseConnection } from '../db/index.js';
 import {
   homes,
   users,
@@ -11,19 +11,19 @@ import {
   courseAssignments,
   videoWatchSessions,
   quizAttempts,
-} from '../db/schema.ts';
+} from '../db/schema.js';
 import { eq, and, sql, asc, desc, inArray } from 'drizzle-orm';
-import { requireAuth, requireAdmin, AuthRequest } from '../middleware/auth.ts';
+import { requireAuth, requireAdmin, AuthRequest } from '../middleware/auth.js';
 import {
   createSessionToken,
   getSessionCookieOptions,
   SESSION_COOKIE_NAME,
   createPasswordChangeToken,
   verifyPasswordChangeToken,
-} from '../lib/session.ts';
-import { hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '../lib/password.ts';
-import { sendOtpEmail, EmailNotConfiguredError } from '../lib/mailer.ts';
-import { VIDEO_COMPLETION_THRESHOLD, HEARTBEAT_DELTA_MAX_SECONDS } from '../lib/config.ts';
+} from '../lib/session.js';
+import { hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '../lib/password.js';
+import { sendOtpEmail, EmailNotConfiguredError } from '../lib/mailer.js';
+import { VIDEO_COMPLETION_THRESHOLD, HEARTBEAT_DELTA_MAX_SECONDS } from '../lib/config.js';
 
 dotenv.config({ quiet: true });
 

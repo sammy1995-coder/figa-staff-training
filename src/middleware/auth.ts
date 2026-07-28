@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../lib/firebase-admin.ts';
+import { adminAuth } from '../lib/firebase-admin.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
-import { db } from '../db/index.ts';
-import { users, homes } from '../db/schema.ts';
+import { db } from '../db/index.js';
+import { users, homes } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
-import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from '../lib/session.ts';
+import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from '../lib/session.js';
 
 export interface AuthRequest extends Request {
   user?: {

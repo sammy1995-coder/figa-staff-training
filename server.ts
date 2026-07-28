@@ -2,8 +2,8 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import * as dotenv from 'dotenv';
-import app from './src/server/app.ts';
-import { checkDatabaseConnection, closeDatabasePool } from './src/db/index.ts';
+import app from './src/server/app.js';
+import { checkDatabaseConnection, closeDatabasePool } from './src/db/index.js';
 
 dotenv.config({ quiet: true });
 

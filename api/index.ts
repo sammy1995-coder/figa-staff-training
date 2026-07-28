@@ -3,6 +3,6 @@
 // the Express app's own route matching (e.g. app.get('/api/homes', ...))
 // works unchanged. This file must never call app.listen() — Vercel invokes
 // the exported handler directly per-request.
-import app from '../src/server/app.ts';
+import app from '../src/server/app.js';
 
 export default app;
